@@ -1,0 +1,87 @@
+# =============================================================================
+# Event-Centric Multi-Document News Summarization — Project Configuration
+# =============================================================================
+
+# --- Data Collection (Section 5.1) ---
+newsapi:
+  categories:
+    - business
+    - entertainment
+    - general
+    - health
+    - science
+    - technology
+  language: "en"
+  page_size: 100
+
+# --- Semantic Embeddings (Section 5.2) ---
+embeddings:
+  model_name: "all-MiniLM-L6-v2"
+  snippet_sentences: 3          # Number of leading sentences to combine with title
+  embedding_dim: 384
+
+# --- Clustering (Section 5.3) ---
+clustering:
+  hdbscan:
+    min_cluster_size: 3
+    metric: "cosine"
+  kmeans:
+    n_clusters: 20              # Baseline comparison
+  min_articles_per_cluster: 2   # Discard singleton clusters and noise
+
+# --- Multi-Document Input Construction (Section 5.4) ---
+input_construction:
+  max_input_tokens: 1024
+  sentences_per_article: 3      # Prioritize first 2-3 sentences per article
+  order_by: "published_at"      # Concatenation order
+
+# --- BART Fine-Tuning (Section 5.5) ---
+summarization:
+  model_name: "facebook/bart-large-cnn"
+
+  # Stage 1 — Headline Generation
+  stage1:
+    max_input_tokens: 1024
+    max_output_tokens: 30
+
+  # Stage 2 — Summary Generation
+  stage2:
+    max_input_tokens: 1024
+    max_output_tokens: 128
+
+  # Training Configuration
+  training:
+    optimizer: "adamw"
+    learning_rate: 2.0e-5
+    warmup_steps: 500
+    batch_size: 8
+    gradient_accumulation_steps: 4
+    epochs: 3
+
+# --- Named Entity Recognition (Section 5.6) ---
+ner:
+  spacy_model: "en_core_web_trf"
+  entity_types:
+    - PERSON
+    - ORG
+    - GPE
+    - DATE
+    - EVENT
+
+# --- Evaluation (Section 6) ---
+evaluation:
+  rouge_types:
+    - rouge1
+    - rouge2
+    - rougeL
+  bertscore_model: "roberta-large"
+  human_eval_sample_size: 100
+
+# --- Directory Paths ---
+paths:
+  data_raw: "data/raw"
+  data_processed: "data/processed"
+  data_embeddings: "data/embeddings"
+  data_clusters: "data/clusters"
+  model_checkpoints: "models/checkpoints"
+  model_results: "models/results"

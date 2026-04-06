@@ -1,0 +1,33 @@
+# Core Deep Learning
+torch
+transformers
+datasets
+sentence-transformers
+
+# Clustering
+hdbscan
+scikit-learn
+
+# NER
+spacy
+
+# Evaluation
+rouge-score
+bert-score
+
+# News Collection
+newsapi-python
+
+# UI
+streamlit
+
+# Config Management
+pyyaml
+python-dotenv
+
+# Data Processing
+numpy
+pandas
+
+# Optional: Experiment Tracking
+# wandb
