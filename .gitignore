@@ -6,6 +6,9 @@ models/checkpoints/
 
 # Environment variables
 .env
+.venv/*
+venv/*
+env/*
 
 # Python
 __pycache__/
