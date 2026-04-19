@@ -7,16 +7,20 @@ An end-to-end news summarization system that collects articles from multiple sou
 ## Pipeline Overview
 
 ```
-Data Ingestion → Semantic Embedding → HDBSCAN Clustering → BART Summarization → NER → Streamlit UI
+                   ┌─ Multi-News (pre-grouped clusters) ──────────────┐
+Data Ingestion ────┤                                                   ├─→ BART Summarization → NER → Streamlit UI
+                   └─ NewsAPI (live) → Embedding → HDBSCAN Clustering ┘
 ```
 
-1. **Data Collection** — Fetch articles from NewsAPI across 6 categories
-2. **Preprocessing** — Clean HTML, normalize text, filter short articles
-3. **Embedding** — Encode articles with Sentence Transformers (`all-MiniLM-L6-v2`)
-4. **Clustering** — Group articles by event using HDBSCAN (baseline: K-Means)
-5. **Summarization** — Two-stage BART fine-tuning: headline generation → summary generation with headline prefix
+1. **Data Collection**
+   - *Primary:* Load pre-grouped event clusters from **Multi-News** (with reference summaries for evaluation)
+   - *Live mode:* Fetch articles from **NewsAPI** across 7 categories
+2. **Preprocessing** — Clean HTML, normalize text, filter short articles (NewsAPI path)
+3. **Embedding** — Encode articles with Sentence Transformers (`all-MiniLM-L6-v2`) *(NewsAPI path only)*
+4. **Clustering** — Group articles by event using HDBSCAN, baseline: K-Means *(NewsAPI path only; Multi-News arrives pre-clustered)*
+5. **Summarization** — Two-stage BART fine-tuning on **CNN/Daily Mail**: headline generation → summary generation with headline prefix
 6. **NER** — Extract entities (PERSON, ORG, GPE, DATE, EVENT) with spaCy
-7. **Evaluation** — ROUGE, BERTScore, headline-summary consistency, human evaluation
+7. **Evaluation** — ROUGE, BERTScore (vs. CNN/DM single-doc and Multi-News multi-doc references), headline–summary consistency, human evaluation
 8. **UI** — Streamlit app displaying event cards with entity highlights
 
 ## Setup
@@ -54,22 +58,25 @@ cp .env.example .env
 Each stage can be run independently as a Python module:
 
 ```bash
-# Stage 1: Collect articles from NewsAPI
+# Stage 1a: Load Multi-News pre-grouped event clusters (primary pipeline input)
+python -m src.collection.multinews_loader
+
+# Stage 1b: Collect articles from NewsAPI (optional live mode)
 python -m src.collection.news_fetcher
 
-# Stage 2: Preprocess and clean articles
+# Stage 2: Preprocess and clean articles (NewsAPI path)
 python -m src.preprocessing.cleaner
 
-# Stage 3: Generate sentence embeddings
+# Stage 3: Generate sentence embeddings (NewsAPI path)
 python -m src.embeddings.embedder
 
-# Stage 4: Cluster articles by event
+# Stage 4: Cluster articles by event (NewsAPI path; Multi-News is pre-clustered)
 python -m src.clustering.clusterer
 
-# Stage 5: Fine-tune BART (headline + summary)
+# Stage 5: Fine-tune BART on CNN/Daily Mail (headline + summary)
 python -m src.summarization.trainer
 
-# Stage 6: Run inference on clusters
+# Stage 6: Run inference on clusters (Multi-News or NewsAPI)
 python -m src.summarization.summarizer
 
 # Stage 7: Extract named entities
@@ -103,7 +110,7 @@ python -m pytest tests/
 ├── data/                   # Raw, processed, embeddings, and cluster data
 ├── models/                 # Checkpoints and evaluation results
 ├── src/                    # Pipeline source code
-│   ├── collection/         # NewsAPI article fetching
+│   ├── collection/         # Multi-News loader (primary) & NewsAPI fetcher (live mode)
 │   ├── preprocessing/      # Text cleaning and normalization
 │   ├── embeddings/         # Sentence embedding generation
 │   ├── clustering/         # HDBSCAN and K-Means clustering
