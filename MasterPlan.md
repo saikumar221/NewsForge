@@ -231,10 +231,10 @@ news_summarization/
 - [x] Add MasterPlan.md to repo root
 
 ### 📰 News Collection
-- [ ] Implement NewsAPI fetcher (news_fetcher.py)
-- [ ] Fetch articles across all 6 categories (politics, tech, sports, health, business, science)
-- [ ] Save raw articles to data/raw/
-- [ ] Verify article count and source diversity
+- [x] Implement NewsAPI fetcher (news_fetcher.py)
+- [x] Fetch articles across all 7 categories (business, entertainment, general, health, science, sports, technology)
+- [x] Save raw articles to data/raw/
+- [x] Verify article count and source diversity
 
 ### 🧹 Preprocessing
 - [ ] Implement text cleaner (cleaner.py)

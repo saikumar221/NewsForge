@@ -10,7 +10,9 @@ newsapi:
     - general
     - health
     - science
+    - sports
     - technology
+  country: "us"
   language: "en"
   page_size: 100
 
