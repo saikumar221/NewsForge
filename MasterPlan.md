@@ -17,13 +17,21 @@ This project builds an intelligent, end-to-end news summarization system that au
 
 ## 2. Objectives
 
-1. Automatically collect news articles from multiple sources using NewsAPI
+1. Ingest multi-document event clusters from **Multi-News** (primary pipeline input, pre-grouped with reference summaries) and, as an optional live mode, **NewsAPI**
 2. Represent articles as semantic embeddings using Sentence Transformers
-3. Cluster articles covering the same event using unsupervised clustering (HDBSCAN)
-4. Fine-tune BART in a two-stage pipeline to generate a headline and summary per cluster
+3. Cluster articles covering the same event using unsupervised clustering (HDBSCAN) — applied to NewsAPI articles; Multi-News arrives pre-clustered
+4. Fine-tune BART on **CNN/Daily Mail** in a two-stage pipeline to generate a headline and summary per cluster
 5. Extract named entities (people, organizations, locations) using spaCy
-6. Evaluate summarization quality using ROUGE and BERTScore
+6. Evaluate summarization quality using ROUGE and BERTScore — against CNN/Daily Mail (single-doc) and Multi-News (multi-doc) references
 7. Present results in a Streamlit UI displaying summarized events with entity highlights
+
+### Dataset Roles
+
+| Dataset | Role | Notes |
+|---------|------|-------|
+| **CNN/Daily Mail** | BART training corpus | Labeled (article → headline + highlights) pairs for Stage 1 & Stage 2 fine-tuning |
+| **Multi-News** | Primary pipeline input & eval | Pre-grouped event clusters (2–10 articles each) with a single reference summary per cluster — used for end-to-end pipeline evaluation and the Streamlit demo |
+| **NewsAPI** | Optional live mode | Current-day articles; requires our HDBSCAN clustering step before summarization |
 
 ---
 
@@ -32,18 +40,22 @@ This project builds an intelligent, end-to-end news summarization system that au
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                        DATA INGESTION                        │
-│   NewsAPI → Raw Articles → Preprocessing → Clean Articles   │
+│   Primary:  Multi-News (pre-grouped event clusters)         │
+│   Optional: NewsAPI (live articles → HDBSCAN clustering)    │
+│             → Preprocessing → Clean Articles                │
 └─────────────────────────┬───────────────────────────────────┘
                           │
 ┌─────────────────────────▼───────────────────────────────────┐
-│                    SEMANTIC CLUSTERING                        │
+│               SEMANTIC CLUSTERING (NewsAPI only)             │
 │   Clean Articles → Sentence Embeddings → HDBSCAN Clusters   │
+│   (Skipped for Multi-News — clusters already provided)      │
 └─────────────────────────┬───────────────────────────────────┘
                           │
 ┌─────────────────────────▼───────────────────────────────────┐
 │                   SUMMARIZATION PIPELINE                      │
 │   Cluster Text → BART Stage 1 (Headline)                    │
 │               → BART Stage 2 (Summary, headline as prefix)  │
+│   (BART fine-tuned on CNN/Daily Mail)                       │
 └─────────────────────────┬───────────────────────────────────┘
                           │
 ┌─────────────────────────▼───────────────────────────────────┐
@@ -61,13 +73,32 @@ This project builds an intelligent, end-to-end news summarization system that au
 
 ## 5. Methodology
 
-### 5.1 Data Collection & Preprocessing
-- Fetch articles from NewsAPI across 6 categories
+### 5.1 Data Sources
+
+The project uses three datasets with distinct, non-overlapping roles.
+
+#### 5.1.1 Multi-News — Primary Pipeline Input
+- **Source:** HuggingFace `alexfabbri/multi_news`
+- **Shape:** Each example is a cluster of 2–10 articles covering a single event, paired with one human-written reference summary
+- **Why it's the primary input:**
+  - Articles arrive **pre-grouped** by event → clustering becomes an optional ablation rather than a dependency
+  - Each cluster ships with a **reference summary** → enables ROUGE/BERTScore on the full multi-doc pipeline (not only single-doc training)
+  - **Full article text** (no truncation), unlike free-tier news APIs
+- **Usage:** Select a subset of the test split (~100–500 clusters) for end-to-end pipeline evaluation and the Streamlit demo
+
+#### 5.1.2 NewsAPI — Optional Live Mode
+- Fetch articles from NewsAPI across 7 categories (business, entertainment, general, health, science, sports, technology)
+- Free tier caveat: content is truncated to ~200 chars. Use `title + description + truncated content` as the working text (sufficient for clustering and short-form demo output)
 - Clean and normalize text:
-  - Remove HTML tags and boilerplate
-  - Filter articles shorter than 100 words
-  - Normalize whitespace and encoding
-- Store raw and processed articles separately
+  - Strip source suffixes from titles (e.g., `" - TechCrunch"`)
+  - Remove `[+N chars]` truncation markers
+  - Normalize whitespace, smart quotes, line breaks
+- Used to drive a **live mode** in the Streamlit UI for demo purposes
+
+#### 5.1.3 CNN/Daily Mail — Training Corpus
+- **Source:** HuggingFace `cnn_dailymail` (version 3.0.0)
+- Labeled `(article → headline, highlights)` pairs
+- Used exclusively for BART Stage 1 (headline) and Stage 2 (summary) fine-tuning — **not** for the live pipeline
 
 ### 5.2 Semantic Embedding Generation
 - Model: `all-MiniLM-L6-v2` from Sentence Transformers
@@ -124,13 +155,22 @@ This project builds an intelligent, end-to-end news summarization system that au
 
 ### 5.7 Ablation Studies
 1. **With vs. without headline prefix** in Stage 2 — does the headline improve summary coherence?
-2. **Single-document vs. multi-document input** — does clustering improve summary quality?
+2. **Single-document vs. multi-document input** — feed a single representative article vs. the full pre-grouped Multi-News cluster into Stage 2; measure ROUGE/BERTScore against the Multi-News reference summary to quantify the gain from multi-doc input.
+3. **Gold clusters vs. HDBSCAN clusters** *(bonus)* — on the NewsAPI live mode or a shuffled Multi-News subset, compare summaries produced from Multi-News' ground-truth clusters against summaries produced from our HDBSCAN-discovered clusters. Isolates clustering quality from summarization quality.
 
 ---
 
 ## 6. Evaluation
 
 ### 6.1 Automatic Metrics
+
+Evaluation is performed against two reference sets, corresponding to the two roles in the pipeline:
+
+| Reference Set | Used For | Reference |
+|---------------|----------|-----------|
+| CNN/Daily Mail test split | BART Stage 1 & Stage 2 (**single-doc**) | Original article headlines and highlights |
+| Multi-News test split | End-to-end **multi-doc** pipeline | Human-written cluster-level reference summaries |
+
 | Metric | Applied To |
 |--------|-----------|
 | ROUGE-1 | Headline and summary unigram overlap |
@@ -138,7 +178,7 @@ This project builds an intelligent, end-to-end news summarization system that au
 | ROUGE-L | Longest common subsequence |
 | BERTScore | Semantic similarity of generated outputs |
 | Headline–Summary Consistency | BERTScore between headline and summary |
-| Silhouette Score | Clustering quality |
+| Silhouette Score | Clustering quality (NewsAPI / HDBSCAN only) |
 
 ### 6.2 Human Evaluation
 Rate 50–100 sampled headline–summary pairs on a 1–5 scale:
@@ -230,18 +270,27 @@ news_summarization/
 - [x] Verify config.yaml is correctly set up
 - [x] Add MasterPlan.md to repo root
 
-### 📰 News Collection
+### 📰 News Collection (Live Mode — Optional)
 - [x] Implement NewsAPI fetcher (news_fetcher.py)
 - [x] Fetch articles across all 7 categories (business, entertainment, general, health, science, sports, technology)
 - [x] Save raw articles to data/raw/
 - [x] Verify article count and source diversity
 
-### 🧹 Preprocessing
+### 📥 Multi-News Pipeline Input (Primary)
+- [x] Load Multi-News dataset from Hugging Face (`tingchih/multi_news_doc` — parquet mirror)
+- [x] Inspect cluster sizes, article counts, and reference summary lengths
+- [x] Select a subset of the test split (300 clusters) as the pipeline eval set
+- [x] Normalize article separators (split on `|||||`) and strip `– ` summary prefix
+- [x] Save pre-grouped cluster inputs + reference summaries to data/processed/multi_news/clusters.json
+
+### 🧹 Preprocessing (NewsAPI Live Mode)
 - [ ] Implement text cleaner (cleaner.py)
+- [ ] Strip source suffixes from titles (e.g., " - TechCrunch")
+- [ ] Remove `[+N chars]` truncation markers
 - [ ] Remove HTML tags and boilerplate
-- [ ] Filter articles shorter than 100 words
-- [ ] Normalize whitespace and encoding
-- [ ] Save processed articles to data/processed/
+- [ ] Normalize whitespace, smart quotes, line breaks, encoding
+- [ ] Build working text = title + description + truncated content (free-tier workaround)
+- [ ] Save processed articles to data/processed/newsapi/
 
 ### 📊 CNN/Daily Mail EDA
 - [ ] Load CNN/Daily Mail dataset via Hugging Face
@@ -298,7 +347,8 @@ news_summarization/
 
 ### 🔁 End-to-End Pipeline Test
 - [ ] Implement inference pipeline in summarizer.py
-- [ ] Run full pipeline on 10–20 NewsAPI clusters
+- [ ] Run full pipeline on 10–20 Multi-News clusters (primary)
+- [ ] Run full pipeline on 10–20 NewsAPI HDBSCAN clusters (live-mode smoke test)
 - [ ] Inspect generated headline–summary pairs for quality
 - [ ] Log any hallucinations or incoherence issues
 
@@ -316,7 +366,9 @@ news_summarization/
 - [ ] Implement entity highlighting in summaries
 - [ ] Add topic category filters
 - [ ] Add source attribution per event card
-- [ ] Integrate full pipeline into UI (collection → clustering → BART → NER → display)
+- [ ] Primary mode: display pre-computed Multi-News pipeline results
+- [ ] Live mode toggle: fetch NewsAPI → cluster → summarize on demand
+- [ ] Test UI end-to-end on Multi-News clusters
 - [ ] Test UI end-to-end with live NewsAPI data
 - [ ] Refine UI styling and usability
 
@@ -324,16 +376,18 @@ news_summarization/
 - [ ] Ablation 1: Run Stage 2 WITHOUT headline prefix — record ROUGE and BERTScore
 - [ ] Ablation 1: Run Stage 2 WITH headline prefix — record ROUGE and BERTScore
 - [ ] Ablation 1: Compare and document results
-- [ ] Ablation 2: Run pipeline with single-document input — record scores
-- [ ] Ablation 2: Run pipeline with multi-document cluster input — record scores
+- [ ] Ablation 2: Run pipeline with single-document input on Multi-News — record scores
+- [ ] Ablation 2: Run pipeline with full multi-document Multi-News clusters — record scores
 - [ ] Ablation 2: Compare and document results
+- [ ] Ablation 3 (bonus): Compare Multi-News gold clusters vs. HDBSCAN-discovered clusters
+- [ ] Ablation 3 (bonus): Document clustering-quality impact on summary quality
 
 ### 📏 Automatic Evaluation
-- [ ] Run final ROUGE-1, ROUGE-2, ROUGE-L on CNN/Daily Mail test set
-- [ ] Run final BERTScore on CNN/Daily Mail test set
+- [ ] Run final ROUGE-1, ROUGE-2, ROUGE-L on CNN/Daily Mail test set (single-doc)
+- [ ] Run final BERTScore on CNN/Daily Mail test set (single-doc)
+- [ ] Run ROUGE + BERTScore on Multi-News test subset against reference summaries (multi-doc)
 - [ ] Compute headline–summary consistency scores
-- [ ] Evaluate cluster-level summaries against WCEP references
-- [ ] Compile all results into a summary table
+- [ ] Compile all results into a summary table (single-doc vs multi-doc)
 - [ ] Document results in 03_evaluation.ipynb
 
 ### 👤 Human Evaluation

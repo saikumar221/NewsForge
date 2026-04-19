@@ -16,6 +16,14 @@ newsapi:
   language: "en"
   page_size: 100
 
+# --- Multi-News Pipeline Input (Section 5.1.1) ---
+multinews:
+  repo_id: "tingchih/multi_news_doc"
+  split: "test"
+  subset_size: 300              # Number of clusters to keep from the split
+  separator: "|||||"            # Article separator within the `document` field
+  summary_prefix: "– "          # Prefix to strip from reference summaries (en-dash + space)
+
 # --- Semantic Embeddings (Section 5.2) ---
 embeddings:
   model_name: "all-MiniLM-L6-v2"
@@ -83,6 +91,7 @@ evaluation:
 paths:
   data_raw: "data/raw"
   data_processed: "data/processed"
+  data_multinews: "data/processed/multi_news"
   data_embeddings: "data/embeddings"
   data_clusters: "data/clusters"
   model_checkpoints: "models/checkpoints"
