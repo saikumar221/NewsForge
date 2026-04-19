@@ -284,13 +284,14 @@ news_summarization/
 - [x] Save pre-grouped cluster inputs + reference summaries to data/processed/multi_news/clusters.json
 
 ### 🧹 Preprocessing (NewsAPI Live Mode)
-- [ ] Implement text cleaner (cleaner.py)
-- [ ] Strip source suffixes from titles (e.g., " - TechCrunch")
-- [ ] Remove `[+N chars]` truncation markers
-- [ ] Remove HTML tags and boilerplate
-- [ ] Normalize whitespace, smart quotes, line breaks, encoding
-- [ ] Build working text = title + description + truncated content (free-tier workaround)
-- [ ] Save processed articles to data/processed/newsapi/
+- [x] Implement text cleaner (cleaner.py)
+- [x] Strip source suffixes from titles (e.g., " - TechCrunch")
+- [x] Remove `[+N chars]` truncation markers
+- [x] Remove HTML tags and boilerplate
+- [x] Normalize whitespace, smart quotes, line breaks, encoding
+- [x] Build working text = title + description + truncated content (free-tier workaround)
+- [x] Flag paywall-preview articles (`is_paywall_preview` field)
+- [x] Save processed articles to data/processed/newsapi/
 
 ### 📊 CNN/Daily Mail EDA
 - [ ] Load CNN/Daily Mail dataset via Hugging Face
