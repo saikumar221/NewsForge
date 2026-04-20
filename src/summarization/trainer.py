@@ -170,7 +170,6 @@ def build_training_args(
 
     return Seq2SeqTrainingArguments(
         output_dir=output_dir,
-        overwrite_output_dir=True,
         num_train_epochs=training_cfg["epochs"],
         per_device_train_batch_size=training_cfg["batch_size"],
         per_device_eval_batch_size=training_cfg["batch_size"],
@@ -297,15 +296,19 @@ def train_stage1(
         tokenizer=tokenizer, model=model, pad_to_multiple_of=8
     )
 
-    trainer = Seq2SeqTrainer(
+    # transformers 5.0 renamed `tokenizer=` → `processing_class=` on Trainer
+    trainer_kwargs: dict[str, Any] = dict(
         model=model,
         args=training_args,
         train_dataset=tokenized_train,
         eval_dataset=tokenized_eval_subset,
-        tokenizer=tokenizer,
         data_collator=collator,
         compute_metrics=compute_metrics,
     )
+    import inspect
+    sig = inspect.signature(Seq2SeqTrainer.__init__)
+    trainer_kwargs["processing_class" if "processing_class" in sig.parameters else "tokenizer"] = tokenizer
+    trainer = Seq2SeqTrainer(**trainer_kwargs)
 
     print("[train_stage1] Starting training...")
     train_result = trainer.train()
