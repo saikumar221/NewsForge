@@ -257,6 +257,16 @@ def train_stage1(
     print(f"[train_stage1] Loading tokenizer + model: {summ_cfg['model_name']}")
     tokenizer, model = load_tokenizer_and_model(summ_cfg["model_name"])
 
+    # BART-large-cnn ships with summary-style generation defaults (min_length=56,
+    # max_length=142). For Stage 1 headlines (max 48 tokens) those cause the
+    # "min_length > max_length" warning during eval. Override with our config.
+    model.generation_config.min_length = generation_cfg["min_length"]
+    model.generation_config.max_length = stage_cfg["max_output_tokens"]
+    model.generation_config.num_beams = generation_cfg["num_beams"]
+    model.generation_config.length_penalty = generation_cfg["length_penalty"]
+    model.generation_config.no_repeat_ngram_size = generation_cfg["no_repeat_ngram_size"]
+    model.generation_config.early_stopping = generation_cfg["early_stopping"]
+
     print(f"[train_stage1] Loading prepared data from {stage1_data_dir}")
     data = load_from_disk(stage1_data_dir)
     print(

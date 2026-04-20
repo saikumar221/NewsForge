@@ -319,7 +319,7 @@ news_summarization/
 - [x] Set up GPU — **Google Colab free tier (T4)** selected; actual session happens in Stage 1/2 via `notebooks/04_train_bart_colab.ipynb`
 - [ ] Verify PyTorch + CUDA installation — deferred to the Colab training notebook (Stage 1)
 - [x] Prepare CNN/Daily Mail training splits (50K train / 1K val / 1K test by default; `--smoke-test` for 5K/500/500)
-- [x] Prepare headline targets (Stage 1 labels) — sentence-boundary split + expanded `(CNN) --` / `CITY (CNN) --` strip
+- [x] Prepare headline targets (Stage 1 labels) — **first bullet of CNN/DM highlights** (editor-curated salience; headline-shaped ~11-word median). Initially used sentence-boundary split of the article but that caused the model to learn extractive copy; pivoted to first-highlight labels after inspecting training outputs.
 - [x] Prepare summary targets (Stage 2 labels) — highlights joined (`\n` → space); input = `"{headline}\n{article}"`
 - [x] Update training config for T4 — batch_size 4 (↓ from 8), grad_accum 8 (↑ from 4), fp16, gradient_checkpointing
 
@@ -329,9 +329,12 @@ news_summarization/
 - [x] Build Colab training notebook (`notebooks/04_train_bart_colab.ipynb`) — 11-cell flow, Drive-mounted checkpoints
 - [x] Add generation block to config.yaml (num_beams=4, min_length=5, length_penalty=1.0, no_repeat_ngram_size=3)
 - [x] Local validation — compute_metrics unit test passed with 3 hand-crafted pairs (rouge1=0.34, bertscore_f1=0.92)
-- [ ] Fine-tune on CNN/Daily Mail headlines (max 48 output tokens) — *run on Colab via `04_train_bart_colab.ipynb` cell 8*
+- [x] First Colab training run completed (v1 labels — first sentence of article) — ROUGE-1=0.71 was artificially high; model learned extractive copy instead of abstractive headline generation
+- [x] **Pivot**: change headline labels from first-sentence-of-article to first-bullet-of-highlights (editor-curated salience, genuinely abstractive, ~11-word median)
+- [x] Fix `min_length=56` warning by overriding bart-large-cnn's generation_config defaults from our config
+- [ ] Fine-tune on CNN/Daily Mail (v2 labels, max 48 output tokens) — *run on Colab*
 - [ ] Monitor training loss and validation loss — *observed during Colab run*
-- [ ] Save Stage 1 checkpoint to models/checkpoints/ — *auto-saved to Drive at `/content/drive/MyDrive/NewsForge/checkpoints/stage1/`*
+- [ ] Save Stage 1 checkpoint to models/checkpoints/ — *auto-saved to Drive*
 - [ ] Evaluate Stage 1 on validation set (ROUGE-1, ROUGE-2, ROUGE-L, BERTScore F1) — *cell 9 (final full-val eval)*
 - [ ] Qualitatively inspect 20–30 generated headlines — *cell 10 (20 sample headlines with refs)*
 

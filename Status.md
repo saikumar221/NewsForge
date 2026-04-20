@@ -17,10 +17,13 @@ This document records every decision, observation, pivot, and finding from the b
 - 🧹 Preprocessing — NewsAPI (8/8)
 - 📊 CNN/Daily Mail EDA (6/6)
 - 🔢 Embeddings & Clustering (12/12)
-- ⚙️ Training Environment (5/6 — CUDA/PyTorch verification deferred to the Colab training notebook)
+- ⚙️ Training Environment (6/6 — CUDA/PyTorch verification done on first Colab run)
+
+### In progress
+- 🏷️ BART Stage 1 (8/13 — v1 Colab run completed but exposed extractive-copy failure; pivoted to v2 labels = first bullet of highlights; min_length warning fixed; v2 Colab re-run pending)
 
 ### Not started
-- 🏷️ BART Stage 1 · 📝 BART Stage 2 · 📚 Supplementary Fine-Tuning · 🔁 End-to-End Pipeline Test · 🏷️ NER · 🖥️ Streamlit UI · 🔬 Ablation Studies · 📏 Automatic Evaluation · 👤 Human Evaluation · 🔍 Error Analysis · 📄 Final Report · 🎤 Presentation & Demo
+- 📝 BART Stage 2 · 📚 Supplementary Fine-Tuning · 🔁 End-to-End Pipeline Test · 🏷️ NER · 🖥️ Streamlit UI · 🔬 Ablation Studies · 📏 Automatic Evaluation · 👤 Human Evaluation · 🔍 Error Analysis · 📄 Final Report · 🎤 Presentation & Demo
 
 ---
 
@@ -276,6 +279,92 @@ Implication: the MasterPlan's `batch_size: 8` OOMs on a T4. Training config re-t
 
 **Build/infra:** No new dependencies. Reused the already-installed `datasets` package. A `data/processed/cnn_dailymail/{stage1,stage2}/` directory tree now holds the prepared arrow datasets locally (these are re-created fresh on Colab at training time, not uploaded).
 
+### 🏷️ BART Stage 1 — v1 Colab run exposed a label-design flaw; pivot to v2 labels
+
+The first Colab training run completed end-to-end but qualitative inspection of the 20 sample generations revealed the model had learned **extractive copy**, not abstractive headline generation:
+
+```
+ARTICLE: (CNN)So now we know. The Germanwings aircraft that crashed earlier this week...
+REF:     (CNN)So now we know.
+PRED:    So now we know.
+```
+
+```
+ARTICLE: (CNN)More than two decades as a judge, prosecutor and defense lawyer...
+REF:     (CNN)More than two decades as a judge, prosecutor and defense lawyer...
+PRED:    More than two decades as a judge, prosecutor and defense lawyer...
+```
+
+The model was faithfully reproducing its training signal — our v1 `derive_headline` defined the label as "first sentence of the article with `(CNN) --` stripped", so the model correctly learned to copy the first sentence back. **ROUGE-1 of 0.71 was artificially inflated** because the label text *is* a prefix of the article text.
+
+This was *not* the "vagueness / loss of specificity" failure flagged during the selection-metric debate — it was the opposite: **over-extraction baked in by the label, not the metric**. Neither ROUGE-1 nor BERTScore-F1 would have flagged it via their numbers alone; the pathology is only visible by reading outputs.
+
+**v1 training metrics (ceiling effects of a copy-learned model):**
+
+| Epoch | Train Loss | Val Loss | ROUGE-1 | ROUGE-2 | ROUGE-L | BERTScore F1 |
+|-------|-----------|----------|---------|---------|---------|--------------|
+| 1 | 0.267 | 0.494 | 0.696 | 0.677 | 0.689 | 0.9356 |
+| **2** *(best)* | 0.123 | 0.698 | 0.715 | 0.699 | 0.703 | **0.9379** |
+| 3 | 0.103 | 0.726 | 0.693 | 0.677 | 0.690 | 0.9348 |
+
+BERTScore-based selection correctly picked epoch 2 (train loss still dropping, val loss climbing → overfit). Checkpoint persisted to Drive at `/content/drive/MyDrive/NewsForge/checkpoints/stage1/checkpoint-314` (10.8 GB including intermediates).
+
+**Colab-run friction (lessons for future sections):**
+Five non-training issues ate time before training actually started:
+1. Repo was **private** → `git clone` failed silently in non-interactive Colab. Resolved by making public.
+2. `pip install -U -r requirements.txt` **upgraded torch 2.10 → 2.11**, breaking the CUDA-matched stack with `torchvision/torchaudio` (`is_opaque_value` import error). Resolved by switching to a **pip constraints file** that pins Colab's CUDA-matched ML stack and only installs missing packages.
+3. `transformers==5.0.0` on Colab **renamed `tokenizer=` → `processing_class=`** on `Trainer`. Resolved with `inspect.signature` fallback — works on both API generations.
+4. `transformers==5.0.0` **removed `overwrite_output_dir` and `save_safetensors`** from `Seq2SeqTrainingArguments`. Resolved by making `build_training_args` introspect the signature and silently drop unsupported kwargs with a log line for visibility.
+5. Cell 2 had `if not os.path.isdir(WORKDIR)` guard — session restarts didn't pull new commits. Resolved by always running `git fetch origin main && git reset --hard origin/main` on re-run.
+
+**Also fixed during the debrief:**
+- **`min_length=56` warning** — `bart-large-cnn` ships with CNN/DM summary generation defaults (`min_length=56, max_length=142`). At `max_length=48` for headlines these conflict, producing warnings and truncation artifacts (sample 12 cut to `"...world No."` mid-sentence). Fixed by explicitly overriding `model.generation_config.{min_length, max_length, num_beams, length_penalty, no_repeat_ngram_size, early_stopping}` from our config before constructing `Seq2SeqTrainer`.
+
+#### v2 Label pivot: first bullet of `highlights`
+
+CNN/DM has no native headline field. The v2 choice uses the **first bullet of `highlights`**:
+
+- CNN/DM `highlights` is a string of 3–4 editor-written bullets joined by `\n` (no `first_highlight` column; we derive by `highlights.split('\n', 1)[0]`)
+- Bullets are ordered by editorial salience (bullet 1 = main point) — the dataset's closest approximation of a headline
+- **Genuinely abstractive**: bullets are human-rewritten, not copied from the article
+- **Short and news-shaped**: typical 10–15 words (median 11 in our 100-sample local check, vs 25 words for v1 "first sentence of article" labels)
+
+**Side-by-side on the canonical Radcliffe example:**
+
+| Label source | Text | Words |
+|--------------|------|-------|
+| v1: first sentence of article | *LONDON, England (Reuters) -- Harry Potter star Daniel Radcliffe gains access to a reported £20 million ($41.1 million) fortune as he turns 18 on Monday, but he insists the money won't cast a spell on him.* | 38 |
+| **v2: first bullet of highlights** | **Harry Potter star Daniel Radcliffe gets £20M fortune as he turns 18 Monday.** | **13** |
+
+**Sample of 10 v2 training headlines:**
+```
+[ 0] (13w)  Harry Potter star Daniel Radcliffe gets £20M fortune as he turns 18 Monday.
+[ 1] (11w)  Mentally ill inmates in Miami are housed on the "forgotten floor"
+[ 2] (10w)  NEW: "I thought I was going to die," driver says.
+[ 3] (10w)  Five small polyps found during procedure; "none worrisome," spokesman says.
+[ 4] (11w)  NEW: NFL chief, Atlanta Falcons owner critical of Michael Vick's conduct.
+[ 5] (12w)  Parents beam with pride, can't stop from smiling from outpouring of support.
+[ 6] (11w)  Aid workers: Violence, increased cost of living drive women to prostitution.
+[ 7] (12w)  Tomas Medina Caracas was a fugitive from a U.S. drug trafficking indictment.
+[ 9] (11w)  Empty anti-tank weapon turns up in front of New Jersey home.
+```
+
+**Expected v2 training dynamics:**
+- ROUGE-1 will *drop* from ~0.71 to ~0.40–0.50 — this looks like a regression but is actually healthier (the model has to rewrite, not copy)
+- BERTScore F1 may drop from ~0.94 to ~0.90 — semantic closeness is harder to achieve under real abstraction
+- Outputs will read like headlines instead of lead paragraphs
+
+**Implementation:**
+- Rewrote `derive_headline` in [src/preprocessing/cnn_dm_prep.py](src/preprocessing/cnn_dm_prep.py) to split `highlights` on `\n` and take `[0]`
+- Added `_normalize_cnn_dm_text` helper that strips the CNN/DM `" ."` tokenization artifact (`"text ."` → `"text."`)
+- Also applied to `derive_summary_target` for Stage 2 consistency
+- Removed the now-unused `CNN_PREFIX_RE` / `SENTENCE_BOUNDARY_RE` — highlights don't have CNN datelines
+- Overrode `model.generation_config` in `train_stage1` so `min_length` honors our config, not BART's summary defaults
+
+**Local micro-test (100 train / 50 val / 50 test):** all headlines look clean and headline-shaped. First 10 training samples span 6–33 words, median 11.
+
+**Next:** v2 Colab re-run pending user execution.
+
 ---
 
 ## 4. Config & Infra Changes
@@ -359,4 +448,11 @@ Implication: the MasterPlan's `batch_size: 8` OOMs on a T4. Training config re-t
 
 ## 7. Next Section
 
-**🏷️ BART Stage 1 — Headline Generation** per the MasterPlan. Build the training loop (Hugging Face `Seq2SeqTrainer`) inside `src/summarization/trainer.py` and operationalize it via a `notebooks/04_train_bart_colab.ipynb` session on Colab free-tier T4. Smoke test the training loop on the 5K/500/500 data we already prepared, then scale to 50K.
+**🏷️ BART Stage 1 v2 Colab re-run** — user executes [notebooks/04_train_bart_colab.ipynb](notebooks/04_train_bart_colab.ipynb) with the new first-highlight labels. Expected dynamics:
+
+- ROUGE-1 drops from v1's inflated ~0.71 to a healthier ~0.40–0.50 (rewriting > copying)
+- BERTScore F1 drops slightly from ~0.94 to ~0.90
+- Generated outputs should read like real headlines (short, news-shaped) instead of lead paragraphs
+- `min_length=56` warning should be gone (fixed via `model.generation_config` override)
+
+If v2 qualitative inspection looks good, Stage 1 is complete and we proceed to **📝 BART Stage 2 — Summary Generation**: extend `src/summarization/trainer.py` with `train_stage2()` that reuses `tokenize_stage_dataset`/`compute_metrics_factory`/`build_training_args` with Stage 2 config (input = `"{headline}\n{article}"`, output = 128-token summary, same BERTScore-F1 selection metric), and add Stage 2 cells to the Colab notebook.

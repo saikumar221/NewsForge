@@ -31,13 +31,19 @@ import yaml
 from datasets import Dataset, DatasetDict, load_dataset
 
 
-# --- Shared derivation functions (ported from notebooks/01_eda.ipynb) ------------
+# --- Shared derivation functions -------------------------------------------------
 
-# Catches `(CNN) --` and `CITY (CNN) --` variants (see §4 of the EDA notebook).
-# Optional leading city/location prefix: capital start, letters/spaces/punct, ≤40 chars.
-CNN_PREFIX_RE = re.compile(r"^\s*(?:[A-Z][A-Za-z .,'\-]{1,40})?\(CNN\)\s*--\s*")
 WHITESPACE_RE = re.compile(r"\s+")
-SENTENCE_BOUNDARY_RE = re.compile(r"(?<=[.!?])\s+(?=[A-Z0-9\"'])")
+
+# CNN/DM has a tokenization artifact where sentence-ending punctuation is
+# preceded by a space: "text ." instead of "text.". Normalize that away.
+SPACE_BEFORE_PUNCT_RE = re.compile(r"\s+([.!?,:;])")
+
+
+def _normalize_cnn_dm_text(text: str) -> str:
+    """Strip CNN/DM-specific tokenization artifacts and collapse whitespace."""
+    text = SPACE_BEFORE_PUNCT_RE.sub(r"\1", text)
+    return WHITESPACE_RE.sub(" ", text).strip()
 
 
 def load_config(config_path: str = "configs/config.yaml") -> dict:
@@ -46,25 +52,30 @@ def load_config(config_path: str = "configs/config.yaml") -> dict:
         return yaml.safe_load(f)
 
 
-def derive_headline(article: str) -> str:
+def derive_headline(highlights: str) -> str:
     """
-    Return the first sentence of `article` with CNN dateline prefixes removed.
+    Return the **first bullet** of CNN/DM highlights as the headline target.
 
-    CNN/DM v3.0.0 articles have no newlines, so we use a regex sentence boundary
-    split instead of a line split.
+    CNN/DM highlights are human-written summary bullets, ordered by editorial
+    salience (bullet 1 = main point). Using the first bullet as the headline
+    label produces genuinely abstractive, headline-shaped targets (~10–15
+    words, news-shaped) — much stronger than the earlier "first sentence of
+    article" choice which caused the model to learn extractive copy.
     """
-    if not article:
+    if not highlights:
         return ""
-    first_sentence = SENTENCE_BOUNDARY_RE.split(article, maxsplit=1)[0].strip()
-    return CNN_PREFIX_RE.sub("", first_sentence).strip()
+    first_bullet = highlights.split("\n", 1)[0]
+    return _normalize_cnn_dm_text(first_bullet)
 
 
 def derive_summary_target(highlights: str) -> str:
-    """Collapse highlights newlines into spaces (standard CNN/DM convention)."""
+    """
+    Collapse highlights newlines into spaces and strip the "space-before-punct"
+    tokenization artifact (standard CNN/DM convention).
+    """
     if not highlights:
         return ""
-    text = highlights.replace("\n", " ")
-    return WHITESPACE_RE.sub(" ", text).strip()
+    return _normalize_cnn_dm_text(highlights.replace("\n", " "))
 
 
 def word_count(text: str) -> int:
@@ -111,7 +122,7 @@ def build_stage1_rows(rows: list[dict[str, str]]) -> list[dict[str, str]]:
     """Stage 1: article → derived headline."""
     out: list[dict[str, str]] = []
     for r in rows:
-        headline = derive_headline(r["article"])
+        headline = derive_headline(r["highlights"])
         if not headline:
             continue
         out.append(
@@ -126,7 +137,7 @@ def build_stage2_rows(
     """Stage 2: (headline + separator + article) → highlights-as-summary."""
     out: list[dict[str, str]] = []
     for r in rows:
-        headline = derive_headline(r["article"])
+        headline = derive_headline(r["highlights"])
         summary_target = derive_summary_target(r["highlights"])
         if not headline or not summary_target:
             continue
