@@ -125,27 +125,30 @@ The project uses three datasets with distinct, non-overlapping roles.
 - **Model:** `facebook/bart-large-cnn`
 - **Input:** Article/cluster text (max 1024 tokens)
 - **Output:** Single headline (max 48 tokens)
-- **Target:** Original CNN/Daily Mail headlines
+- **Target:** First bullet of CNN/DM `highlights` (editor-curated salience; ~11-word median). Initially tried "first sentence of article" with CNN-dateline strip, but that caused the model to learn extractive copy; pivoted after observing v1 training outputs — see [Status.md](Status.md) for the full debrief.
+- **Selection metric during training:** BERTScore F1 on 500-example val subset per epoch (ROUGE-1/2/L + eval_loss logged but not used for selection — ROUGE would bias toward extraction on this task).
 
 #### Stage 2 — Summary Generation
 - **Model:** `facebook/bart-large-cnn`
-- **Input:** Generated headline prepended to article/cluster text
+- **Input:** Reference (or Stage-1-generated) headline prepended to article/cluster text, newline-separated: `"{headline}\n{article}"`
 - **Output:** 2–3 sentence summary (max 128 tokens)
-- **Target:** Concatenated CNN/Daily Mail highlights
+- **Target:** Concatenated CNN/Daily Mail highlights (newlines → spaces, `" ."` artifact normalized to `"."`)
 
 #### Training Configuration
-| Parameter | Value |
-|-----------|-------|
-| Optimizer | AdamW |
-| Learning Rate | 2e-5 |
-| Warmup Steps | 500 |
-| Batch Size | 8 |
-| Gradient Accumulation Steps | 4 |
-| Epochs | 3 |
-| Max Input Tokens | 1024 |
-| Max Output Tokens (headline) | 48 |
-| Max Output Tokens (summary) | 128 |
-| Hardware | Google Colab Pro (A100) or university cluster |
+| Parameter | Value | Notes |
+|-----------|-------|-------|
+| Optimizer | AdamW | |
+| Learning Rate | 2e-5 | |
+| Warmup Steps | 500 | On the 5K smoke test this exceeds total steps (468) → LR never reaches target; fine at 50K scale. See Status.md open item #11. |
+| Batch Size | 4 | Reduced from 8 for Colab free-tier T4 VRAM (~15 GB) |
+| Gradient Accumulation Steps | 8 | Keeps effective batch size at 32 |
+| Epochs | 3 | |
+| Max Input Tokens | 1024 | |
+| Max Output Tokens (headline) | 48 | Raised from 30 per EDA finding |
+| Max Output Tokens (summary) | 128 | |
+| Mixed Precision | fp16 | Halves memory, faster on T4 |
+| Gradient Checkpointing | enabled | Trades compute for memory |
+| Hardware | Google Colab free tier (Tesla T4, 15 GB VRAM) | Final choice; smoke test validated label design; 50K full run deferred as polish |
 
 ### 5.6 Named Entity Recognition
 - **Model:** `en_core_web_trf` (spaCy transformer model)

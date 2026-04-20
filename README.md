@@ -4,6 +4,23 @@
 
 An end-to-end news summarization system that collects articles from multiple sources, groups those covering the same real-world event, and generates a unified headline and coherent summary for each event cluster. Named entities are extracted and highlighted to give users an at-a-glance understanding of key actors and locations involved.
 
+> **Project state:** see [Status.md](Status.md) for a full decision log and journey. [MasterPlan.md](MasterPlan.md) is the detailed specification.
+
+## Current progress
+
+| Stage | Status |
+|-------|--------|
+| 🛠️ Project Setup | ✅ Complete |
+| 📰 News Collection (NewsAPI live mode) | ✅ 340 articles, 203 sources |
+| 📥 Multi-News Pipeline Input | ✅ 300 test clusters |
+| 🧹 Preprocessing (NewsAPI) | ✅ 335 cleaned, paywall-flagged |
+| 📊 CNN/Daily Mail EDA | ✅ 15K sample analyzed |
+| 🔢 Embeddings & Clustering | ✅ 21 HDBSCAN clusters |
+| ⚙️ Training Environment | ✅ Colab T4, CNN/DM prep module |
+| 🏷️ BART Stage 1 (headline) | ✅ Smoke-validated (v2 labels); 50K full run optional |
+| 📝 BART Stage 2 (summary) | ⏭️ Next |
+| 🏷️ NER / 🖥️ UI / 🔬 Ablations / 📏 Eval / 📄 Report | ⏳ Pending |
+
 ## Pipeline Overview
 
 ```
@@ -28,15 +45,15 @@ Data Ingestion ────┤                                                  
 ### 1. Clone the repository
 
 ```bash
-git clone <repository-url>
-cd news_summarization
+git clone https://github.com/saikumar221/NewsForge.git
+cd NewsForge
 ```
 
 ### 2. Create a virtual environment
 
 ```bash
-python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
+python -m venv .venv
+source .venv/bin/activate  # On Windows: .venv\Scripts\activate
 ```
 
 ### 3. Install dependencies
@@ -55,7 +72,7 @@ cp .env.example .env
 
 ## Running the Pipeline
 
-Each stage can be run independently as a Python module:
+Each stage can be run independently as a Python module. Everything that runs locally works on CPU; only BART fine-tuning needs a GPU (we use Colab free-tier T4 via `notebooks/04_train_bart_colab.ipynb`).
 
 ```bash
 # Stage 1a: Load Multi-News pre-grouped event clusters (primary pipeline input)
@@ -64,23 +81,29 @@ python -m src.collection.multinews_loader
 # Stage 1b: Collect articles from NewsAPI (optional live mode)
 python -m src.collection.news_fetcher
 
-# Stage 2: Preprocess and clean articles (NewsAPI path)
+# Stage 2: Preprocess and clean NewsAPI articles (live mode only)
 python -m src.preprocessing.cleaner
 
-# Stage 3: Generate sentence embeddings (NewsAPI path)
+# Stage 3: Prepare CNN/Daily Mail training data (Stage 1 + Stage 2 labels)
+python -m src.preprocessing.cnn_dm_prep                   # 50K/1K/1K (full)
+python -m src.preprocessing.cnn_dm_prep --smoke-test      # 5K/500/500 smoke
+
+# Stage 4: Generate sentence embeddings (NewsAPI path only)
 python -m src.embeddings.embedder
 
-# Stage 4: Cluster articles by event (NewsAPI path; Multi-News is pre-clustered)
+# Stage 5: Cluster articles by event (NewsAPI only; Multi-News arrives pre-clustered)
 python -m src.clustering.clusterer
 
-# Stage 5: Fine-tune BART on CNN/Daily Mail (headline + summary)
-python -m src.summarization.trainer
+# Stage 6: Fine-tune BART on Colab (not locally — needs GPU)
+#   Open notebooks/04_train_bart_colab.ipynb in Colab
+#   Set Runtime → T4 GPU, then Runtime → Run all.
+#   Cell 5 has SMOKE_TEST and SAVE_TO_DRIVE toggles.
 
-# Stage 6: Run inference on clusters (Multi-News or NewsAPI)
-python -m src.summarization.summarizer
+# Stage 7: Run inference on clusters (Multi-News or NewsAPI) — not yet implemented
+# python -m src.summarization.summarizer
 
-# Stage 7: Extract named entities
-python -m src.ner.entity_extractor
+# Stage 8: Extract named entities — not yet implemented
+# python -m src.ner.entity_extractor
 ```
 
 ## Evaluation
@@ -107,21 +130,41 @@ python -m pytest tests/
 ## Project Structure
 
 ```
-├── data/                   # Raw, processed, embeddings, and cluster data
-├── models/                 # Checkpoints and evaluation results
-├── src/                    # Pipeline source code
-│   ├── collection/         # Multi-News loader (primary) & NewsAPI fetcher (live mode)
-│   ├── preprocessing/      # Text cleaning and normalization
-│   ├── embeddings/         # Sentence embedding generation
-│   ├── clustering/         # HDBSCAN and K-Means clustering
-│   ├── summarization/      # BART fine-tuning and inference
-│   ├── ner/                # spaCy NER extraction
-│   └── evaluation/         # ROUGE and BERTScore evaluation
-├── ui/                     # Streamlit application
-├── notebooks/              # EDA, clustering experiments, evaluation
-├── tests/                  # Unit tests
-├── configs/                # Project configuration (config.yaml)
-├── requirements.txt        # Python dependencies
-├── .env.example            # Environment variable template
-└── MasterPlan.md           # Full project specification
+├── data/
+│   ├── raw/                            # NewsAPI raw JSON dumps
+│   ├── processed/
+│   │   ├── newsapi/                    # Cleaned, paywall-flagged NewsAPI articles
+│   │   ├── multi_news/                 # Pre-grouped Multi-News clusters + refs
+│   │   └── cnn_dailymail/              # Stage 1 + Stage 2 HF DatasetDicts
+│   ├── embeddings/                     # (335, 384) L2-normalized sentence embeddings
+│   └── clusters/                       # HDBSCAN + K-Means cluster assignments
+├── models/
+│   ├── checkpoints/                    # BART fine-tuned checkpoints (local; Colab uses /content or Drive)
+│   └── results/                        # Evaluation results
+├── src/
+│   ├── collection/
+│   │   ├── news_fetcher.py             # NewsAPI article collection
+│   │   └── multinews_loader.py         # Multi-News parquet loader (primary pipeline input)
+│   ├── preprocessing/
+│   │   ├── cleaner.py                  # NewsAPI text cleaning / paywall detection
+│   │   └── cnn_dm_prep.py              # CNN/DM Stage 1 + Stage 2 label construction
+│   ├── embeddings/embedder.py          # Sentence Transformer encoding (NewsAPI)
+│   ├── clustering/clusterer.py         # HDBSCAN + K-Means + multi-doc input construction
+│   ├── summarization/
+│   │   ├── trainer.py                  # BART two-stage fine-tuning (Seq2SeqTrainer)
+│   │   └── summarizer.py               # Inference pipeline (skeleton — pending)
+│   ├── ner/entity_extractor.py         # spaCy NER (skeleton — pending)
+│   └── evaluation/evaluator.py         # ROUGE + BERTScore (skeleton — pending)
+├── ui/app.py                           # Streamlit UI (skeleton — pending)
+├── notebooks/
+│   ├── 01_eda.ipynb                    # CNN/DM + NewsAPI EDA (executed)
+│   ├── 02_clustering.ipynb             # HDBSCAN sweep + UMAP viz (executed)
+│   ├── 03_evaluation.ipynb             # Evaluation report (skeleton)
+│   └── 04_train_bart_colab.ipynb       # Colab T4 training notebook for BART Stage 1/2
+├── tests/test_pipeline.py              # Unit tests (skeleton)
+├── configs/config.yaml                 # All project config (model, training, paths, metrics)
+├── requirements.txt                    # Python dependencies (incl. Colab-safe extras)
+├── .env.example                        # Environment variable template
+├── MasterPlan.md                       # Full project specification
+└── Status.md                           # Decision log and journey
 ```

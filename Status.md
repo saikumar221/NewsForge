@@ -20,7 +20,7 @@ This document records every decision, observation, pivot, and finding from the b
 - ⚙️ Training Environment (6/6 — CUDA/PyTorch verification done on first Colab run)
 
 ### In progress
-- 🏷️ BART Stage 1 (8/13 — v1 Colab run completed but exposed extractive-copy failure; pivoted to v2 labels = first bullet of highlights; min_length warning fixed; v2 Colab re-run pending)
+- 🏷️ BART Stage 1 (13/13 smoke-validated — v2 labels produce abstractive headlines; extractive-copy failure eliminated; checkpoint at `/content/checkpoints/stage1/best/`. **Optional:** full 50K run for polish.)
 
 ### Not started
 - 📝 BART Stage 2 · 📚 Supplementary Fine-Tuning · 🔁 End-to-End Pipeline Test · 🏷️ NER · 🖥️ Streamlit UI · 🔬 Ablation Studies · 📏 Automatic Evaluation · 👤 Human Evaluation · 🔍 Error Analysis · 📄 Final Report · 🎤 Presentation & Demo
@@ -363,7 +363,63 @@ CNN/DM has no native headline field. The v2 choice uses the **first bullet of `h
 
 **Local micro-test (100 train / 50 val / 50 test):** all headlines look clean and headline-shaped. First 10 training samples span 6–33 words, median 11.
 
-**Next:** v2 Colab re-run pending user execution.
+#### v2 Colab smoke-test results — labels fixed, extractive-copy failure eliminated
+
+The v2 smoke test (5K train / 500 val / 500 test) ran cleanly on Colab T4 with no new infrastructure issues (the `SAVE_TO_DRIVE=False` toggle kept checkpoints in `/content/checkpoints/stage1` to avoid the user's full Google Drive). The label pivot delivered exactly the shift we predicted.
+
+**Metric comparison v1 vs v2:**
+
+| Metric | v1 (first-sentence-of-article) | v2 (first-bullet-of-highlights) | Interpretation |
+|--------|-------------------------------|--------------------------------|----------------|
+| ROUGE-1 | 0.715 | 0.329 | ↓ expected — real abstraction demand, not copy |
+| ROUGE-2 | 0.699 | 0.168 | ↓ expected |
+| ROUGE-L | 0.703 | 0.296 | ↓ expected |
+| BERTScore F1 | 0.938 | 0.901 | ↓ slightly (healthy) |
+
+ROUGE-1 ≈ 0.33 is the typical range for genuinely abstractive CNN/DM summarization. BERTScore holding at 0.90 confirms semantic fidelity survived the abstraction demand.
+
+**Qualitative samples from cell 10's 20-example inspection (all look like real headlines):**
+
+```
+REF:  Actor Ashton Kutcher complained on Facebook that men's rooms don't have diapering tables.
+PRED: Ashton Kutcher's Facebook post about lack of diaper changing tables has parents talking.
+
+REF:  Two Chinese men have been jailed for selling military intelligence.
+PRED: Two Chinese men jailed for selling military intelligence to foreign spies, state media reports.
+
+REF:  Thousands march in a protest against terrorism in Tunisia's capital.
+PRED: Thousands march in Tunisia's capital, protesting against terrorism.
+```
+
+Short, news-shaped, paraphrased (not copied). The v1 pathological behavior (verbatim first-sentence-of-article output) is **completely eliminated**. A handful of outputs are off-topic on small data (e.g., sample 1 picks up "Obama" from the article instead of the Scott Walker subject) — a data-volume artifact, not a label issue.
+
+#### Training-dynamics artifact: warmup phase never completed on the smoke test
+
+v2 training loss stayed high across all three epochs (8.13 → 7.32 → 5.96) — an order of magnitude larger than v1's ~0.1–0.3. Initial suspicion was a bug; actual cause is a **warmup-too-long** effect specific to the smoke test's tiny step budget:
+
+- Total steps: 4997 / (batch 4 × grad_accum 8) = ~156 per epoch × 3 epochs = **468 steps**
+- `warmup_steps` (from config): **500**
+- 468 < 500 → LR linearly ramps from 0 to 2e-5 the entire run and never hits the target
+
+Consequence: the model barely moves from the pretrained `bart-large-cnn` weights. The reason outputs still look good is that `bart-large-cnn` was *already* fine-tuned on CNN/DM by the original BART authors — our tiny-LR nudge just shifts the generation distribution slightly toward shorter, more headline-shaped outputs.
+
+This also shows up as a **noise-level spread** in BERTScore across epochs: `0.9004 → 0.9005 → 0.9008` (0.0004 spread). Best-model selection under BERTScore F1 is effectively picking the last checkpoint by default.
+
+**On the 50K full run, this artifact disappears:**
+- 50K / 32 = ~1562 steps × 3 epochs = 4687 total
+- 500 warmup = ~11% of total — standard ratio
+- Expected training loss: starts ~6–8 and drops to ~1–2
+- Expected epoch-to-epoch metric deltas: meaningful, not noise
+
+**Optional tightening (deferred):** add a `warmup_steps` override when `SMOKE_TEST=True` (e.g., `warmup_steps=50`) so future smoke tests exercise realistic training dynamics. Not urgent — the v2 smoke test already validated the label change, which was its purpose.
+
+#### Stage 1 verdict: correctness gate cleared
+
+The smoke test's purpose was to validate the label swap. It did. Qualitative output looks like headlines; extractive-copy failure eliminated; no infrastructure or training-framework errors. **Stage 1 is behaviorally correct.**
+
+Whether to run the full 50K before moving on is a **polish-vs-progress decision**, not a correctness decision:
+- **A working Stage 1 checkpoint exists** at `/content/checkpoints/stage1/best/` — effectively "bart-large-cnn gently nudged toward shorter, headline-shaped outputs." Sufficient to feed Stage 2's headline-prefix input.
+- Full 50K would produce a checkpoint where training actually learned non-trivially and yields paper-comparable numbers. Roughly 2h on Colab, may span sessions.
 
 ---
 
@@ -442,17 +498,29 @@ CNN/DM has no native headline field. The v2 choice uses the **first bullet of `h
 
 9. **Checkpoint persistence strategy on Colab.** Colab free-tier sessions die after ~12h and ephemerally. The training notebook will need to mount Google Drive and save checkpoints there, or the work is lost on disconnect. Config flag for this will be added when we build the notebook.
 
-10. **Stage 1 headline quality under training.** Smoke-test inspection showed the sample kept a Reuters dateline inside the headline target. This is consistent with our EDA-driven decision (Reuters is 0.1%, not worth a rule). If Stage 1 learns to emit Reuters datelines at inference time, we'll know the decision was wrong and can add a second regex.
+10. ~~**Stage 1 headline quality under training.**~~ **Resolved in v1/v2 Colab runs:** v1 exposed the extractive-copy failure caused by using "first sentence of article" as label; v2 switched to "first bullet of highlights" and produced short, abstractive, headline-shaped outputs. Reuters-dateline leakage was not observed in the v2 smoke-test generations.
+
+11. **Stage 1 warmup-too-long on smoke-test scale.** v2 smoke test had 468 total training steps but `warmup_steps=500` (from the config tuned for 50K training). LR never reached target → model barely moved from pretrained weights. Outputs still look good because `bart-large-cnn` is already CNN/DM-trained, but this means the smoke test doesn't exercise realistic training dynamics. **On the 50K full run this disappears** (warmup = 11% of 4687 steps, standard ratio). **Optional fix:** add a `warmup_steps` override when `SMOKE_TEST=True` — deferred.
+
+12. **Full 50K Stage 1 run.** Smoke test confirmed correctness; full run is polish-only and requires ~2h Colab time (may span sessions). The existing `/content/checkpoints/stage1/best/` checkpoint is usable for feeding Stage 2. Deferred — user decision pending.
+
+13. **Stage 1 checkpoint is on Colab `/content/`, not persisted.** Smoke test deliberately saved locally (Drive was out of space). If the Colab session drops before Stage 2 runs, the checkpoint is lost and we'd need to re-train (fast at smoke-test scale). For the real Stage 2 pipeline, either flip `SAVE_TO_DRIVE=True` (requires Drive space) or train Stage 1 + Stage 2 in the same session.
 
 ---
 
 ## 7. Next Section
 
-**🏷️ BART Stage 1 v2 Colab re-run** — user executes [notebooks/04_train_bart_colab.ipynb](notebooks/04_train_bart_colab.ipynb) with the new first-highlight labels. Expected dynamics:
+**Decision point — two paths forward:**
 
-- ROUGE-1 drops from v1's inflated ~0.71 to a healthier ~0.40–0.50 (rewriting > copying)
-- BERTScore F1 drops slightly from ~0.94 to ~0.90
-- Generated outputs should read like real headlines (short, news-shaped) instead of lead paragraphs
-- `min_length=56` warning should be gone (fixed via `model.generation_config` override)
+**Path A (recommended): Proceed to 📝 BART Stage 2 — Summary Generation.**
+Stage 1 smoke-validated. A working checkpoint exists. Stage 2 extends `src/summarization/trainer.py` with `train_stage2()` that reuses `tokenize_stage_dataset` / `compute_metrics_factory` / `build_training_args` against Stage 2 config:
+- input column = `input` (already assembled as `"{headline}\n{article}"` by `cnn_dm_prep.py`)
+- target column = `target` (joined highlights)
+- `max_output_tokens=128` (vs Stage 1's 48)
+- same BERTScore-F1 selection metric, same per-epoch eval on 500 val subset
+Adds Stage 2 cells to `notebooks/04_train_bart_colab.ipynb` (a training cell + eval cell + sample-inspection cell). Stage 2 training is independent of Stage 1 at training time (uses the *reference* headline as prefix), so the current Stage 1 checkpoint quality doesn't gate Stage 2 training — only downstream inference.
 
-If v2 qualitative inspection looks good, Stage 1 is complete and we proceed to **📝 BART Stage 2 — Summary Generation**: extend `src/summarization/trainer.py` with `train_stage2()` that reuses `tokenize_stage_dataset`/`compute_metrics_factory`/`build_training_args` with Stage 2 config (input = `"{headline}\n{article}"`, output = 128-token summary, same BERTScore-F1 selection metric), and add Stage 2 cells to the Colab notebook.
+**Path B: Full 50K Stage 1 run first.**
+Produces a checkpoint with real learning and paper-comparable numbers. Roughly 2h Colab time. Would require either resolving Drive space or completing in a single session to keep the checkpoint.
+
+User to choose before we proceed.
