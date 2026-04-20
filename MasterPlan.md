@@ -316,11 +316,12 @@ news_summarization/
 - [x] Document clustering experiments in 02_clustering.ipynb
 
 ### ⚙️ Training Environment
-- [ ] Set up Google Colab Pro or university cluster with GPU
-- [ ] Verify PyTorch + CUDA installation
-- [ ] Prepare CNN/Daily Mail training splits
-- [ ] Prepare headline targets (Stage 1 labels)
-- [ ] Prepare summary targets (Stage 2 labels)
+- [x] Set up GPU — **Google Colab free tier (T4)** selected; actual session happens in Stage 1/2 via `notebooks/04_train_bart_colab.ipynb`
+- [ ] Verify PyTorch + CUDA installation — deferred to the Colab training notebook (Stage 1)
+- [x] Prepare CNN/Daily Mail training splits (50K train / 1K val / 1K test by default; `--smoke-test` for 5K/500/500)
+- [x] Prepare headline targets (Stage 1 labels) — sentence-boundary split + expanded `(CNN) --` / `CITY (CNN) --` strip
+- [x] Prepare summary targets (Stage 2 labels) — highlights joined (`\n` → space); input = `"{headline}\n{article}"`
+- [x] Update training config for T4 — batch_size 4 (↓ from 8), grad_accum 8 (↑ from 4), fp16, gradient_checkpointing
 
 ### 🏷️ BART Stage 1 — Headline Generation
 - [ ] Implement training loop in trainer.py for Stage 1

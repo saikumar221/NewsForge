@@ -24,6 +24,16 @@ multinews:
   separator: "|||||"            # Article separator within the `document` field
   summary_prefix: "– "          # Prefix to strip from reference summaries (en-dash + space)
 
+# --- CNN/Daily Mail Training Data Prep (Section ⚙️ Training Environment) ---
+cnn_dm:
+  repo_id: "abisee/cnn_dailymail"
+  version: "3.0.0"
+  n_train: 50000                # 50K subset for Colab free tier; smoke test uses 5K
+  n_val: 1000
+  n_test: 1000
+  min_article_words: 50         # Drop degenerate examples under this threshold
+  stage2_separator: "\n"        # Joiner between headline prefix and article body
+
 # --- Semantic Embeddings (Section 5.2) ---
 embeddings:
   model_name: "all-MiniLM-L6-v2"
@@ -59,14 +69,16 @@ summarization:
     max_input_tokens: 1024
     max_output_tokens: 128
 
-  # Training Configuration
+  # Training Configuration (tuned for Colab free tier T4 GPU, ~15GB VRAM)
   training:
     optimizer: "adamw"
     learning_rate: 2.0e-5
     warmup_steps: 500
-    batch_size: 8
-    gradient_accumulation_steps: 4
+    batch_size: 4                    # Reduced from 8 to fit BART-large on T4
+    gradient_accumulation_steps: 8   # Keeps effective batch size at 32
     epochs: 3
+    fp16: true                       # Mixed-precision training — halves memory, faster on T4
+    gradient_checkpointing: true     # Trades compute for memory (recomputes activations in backward)
 
 # --- Named Entity Recognition (Section 5.6) ---
 ner:
@@ -92,6 +104,7 @@ paths:
   data_raw: "data/raw"
   data_processed: "data/processed"
   data_multinews: "data/processed/multi_news"
+  data_cnn_dm: "data/processed/cnn_dailymail"
   data_embeddings: "data/embeddings"
   data_clusters: "data/clusters"
   model_checkpoints: "models/checkpoints"

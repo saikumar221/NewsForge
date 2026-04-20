@@ -17,9 +17,10 @@ This document records every decision, observation, pivot, and finding from the b
 - 🧹 Preprocessing — NewsAPI (8/8)
 - 📊 CNN/Daily Mail EDA (6/6)
 - 🔢 Embeddings & Clustering (12/12)
+- ⚙️ Training Environment (5/6 — CUDA/PyTorch verification deferred to the Colab training notebook)
 
 ### Not started
-- ⚙️ Training Environment · 🏷️ BART Stage 1 · 📝 BART Stage 2 · 📚 Supplementary Fine-Tuning · 🔁 End-to-End Pipeline Test · 🏷️ NER · 🖥️ Streamlit UI · 🔬 Ablation Studies · 📏 Automatic Evaluation · 👤 Human Evaluation · 🔍 Error Analysis · 📄 Final Report · 🎤 Presentation & Demo
+- 🏷️ BART Stage 1 · 📝 BART Stage 2 · 📚 Supplementary Fine-Tuning · 🔁 End-to-End Pipeline Test · 🏷️ NER · 🖥️ Streamlit UI · 🔬 Ablation Studies · 📏 Automatic Evaluation · 👤 Human Evaluation · 🔍 Error Analysis · 📄 Final Report · 🎤 Presentation & Demo
 
 ---
 
@@ -225,6 +226,56 @@ User confirmed expanding the regex to catch both CNN variants (~29.6% coverage).
 
 **Output saved to** `data/clusters/newsapi_clusters.json` (HDBSCAN, primary) and `data/clusters/newsapi_clusters_kmeans.json` (K-Means, comparison only).
 
+### ⚙️ Training Environment
+
+**Scope:** Prepare CNN/Daily Mail training splits for BART two-stage fine-tuning. Set up the GPU target. Actual training stays in the upcoming Stage 1 / Stage 2 sections — this section produces the data and the runtime config only.
+
+**GPU decision**
+| Options considered | Outcome |
+|--------------------|---------|
+| Colab Pro, NEU Discovery Cluster, RunPod, Lambda, Kaggle Notebooks, LoRA-on-Colab-free, skip fine-tuning and use pre-trained `facebook/bart-large-cnn` | User has no existing GPU access. Picked **Colab free tier (T4, ~15GB VRAM)**. |
+
+Implication: the MasterPlan's `batch_size: 8` OOMs on a T4. Training config re-tuned for T4 constraints.
+
+**Decisions**
+| Q | Answer |
+|---|--------|
+| Training data scope | 5K/500/500 smoke test first, then 50K/1K/1K for the real run |
+| Stage 2 prefix format | Newline-separated: `"{headline}\n{article}"` (what the BART paper does) |
+| Data flow | Re-prep on Colab using the same module — no data upload to Drive |
+| Training notebook location | `notebooks/04_train_bart_colab.ipynb` (built in Stage 1/2 work) |
+| Tokenization timing | On-the-fly via HF `Trainer` (not pre-tokenized) |
+| Output format | HF `Dataset.save_to_disk` (arrow) at `data/processed/cnn_dailymail/{stage1,stage2}/` |
+| Prefix-strip rule | Port the expanded `(CNN) --` / `CITY (CNN) --` regex from the EDA notebook |
+| Min article length | ≥50 words (drops truly degenerate examples) |
+| T4 training config | `batch_size=4`, `grad_accum=8` (effective 32), `fp16=true`, `gradient_checkpointing=true` |
+
+**What was built:** [src/preprocessing/cnn_dm_prep.py](src/preprocessing/cnn_dm_prep.py)
+- `derive_headline`, `derive_summary_target`, `word_count` — shared derivation utilities ported from the EDA notebook
+- `load_cnn_dm_subset`, `filter_by_length`
+- `build_stage1_rows` — Stage 1: `article → headline`
+- `build_stage2_rows` — Stage 2: `"{headline}\n{article}" → summary_target`
+- `build_stage1_dataset`, `build_stage2_dataset` — wrap the above into `DatasetDict` across train/val/test
+- `save_datasets`
+- `main()` with CLI flags: `--n-train`, `--n-val`, `--n-test`, `--smoke-test`, `--output-root`
+
+**Run friction:**
+- First attempt ran `python -m src.preprocessing.cnn_dm_prep --smoke-test 2>&1 | tail -40`. The pipe buffered all output until completion, and the HF stream download hung for 10+ minutes (process was alive at 4.5s CPU time but blocked on I/O). Killed and retried.
+- Second attempt: ran a **micro test** (100/50/50) without the pipe — completed in seconds, confirmed the code path works and Stage 1/2 datasets save correctly.
+- Third attempt: ran the **full smoke test (5K/500/500)** with `python -u` for unbuffered output + `tail -f`/grep monitoring — completed cleanly.
+
+**Smoke test results**
+- Requested 5000/500/500 → kept **4997/500/500** for both Stage 1 and Stage 2
+- 3 train examples dropped for <50-word articles; 0 from val/test
+- Stage 1 schema verified: `[id, article, headline]`
+- Stage 2 schema verified: `[id, input, target, headline]`
+- Stage 2 `input` format verified: newline at position 204 in the first example cleanly separates the headline prefix from the article body; text before the newline exactly matches the `headline` column
+- Stage 2 `target` verified: highlights joined with spaces (0 newlines in output)
+
+**Observation carried forward:** The sample Stage 1 headline kept the Reuters dateline — `"LONDON, England (Reuters) -- Harry Potter star..."`. Consistent with the EDA decision (Reuters patterns are 0.1% of the sample; not worth a separate regex). Our strip rule is CNN-only by design.
+
+**Build/infra:** No new dependencies. Reused the already-installed `datasets` package. A `data/processed/cnn_dailymail/{stage1,stage2}/` directory tree now holds the prepared arrow datasets locally (these are re-created fresh on Colab at training time, not uploaded).
+
 ---
 
 ## 4. Config & Infra Changes
@@ -235,8 +286,14 @@ User confirmed expanding the regex to catch both CNN variants (~29.6% coverage).
 | `newsapi.categories` | 6 (no sports) | 7 (adds sports) |
 | `newsapi.country` | — | `us` |
 | `multinews.*` | — | Added full block (repo, split, subset_size=300, separator, summary_prefix) |
+| `cnn_dm.*` | — | Added full block (repo, version, n_train=50000, n_val=1000, n_test=1000, min_article_words=50, stage2_separator) |
 | `paths.data_multinews` | — | `data/processed/multi_news` |
+| `paths.data_cnn_dm` | — | `data/processed/cnn_dailymail` |
 | `summarization.stage1.max_output_tokens` | 30 | 48 (EDA finding) |
+| `summarization.training.batch_size` | 8 | 4 (T4 VRAM constraint) |
+| `summarization.training.gradient_accumulation_steps` | 4 | 8 (keeps effective batch at 32) |
+| `summarization.training.fp16` | — | `true` (halves memory, faster on T4) |
+| `summarization.training.gradient_checkpointing` | — | `true` (trades compute for memory) |
 | `clustering.hdbscan.min_cluster_size` | 3 | 2 (sweep winner) |
 | `clustering.hdbscan.metric` | `"cosine"` (label) | clarifying comment: implemented as euclidean on L2-normalized vectors |
 
@@ -269,6 +326,8 @@ User confirmed expanding the regex to catch both CNN variants (~29.6% coverage).
 | `data/embeddings/article_index.json` | Row → URL/title mapping |
 | `data/clusters/newsapi_clusters.json` | HDBSCAN payload (21 clusters + metadata) |
 | `data/clusters/newsapi_clusters_kmeans.json` | K-Means baseline |
+| `data/processed/cnn_dailymail/stage1/` | HF `DatasetDict` — Stage 1 (`article` → `headline`), smoke test 4997/500/500 |
+| `data/processed/cnn_dailymail/stage2/` | HF `DatasetDict` — Stage 2 (`"{headline}\n{article}"` → `summary_target`), smoke test 4997/500/500 |
 | `notebooks/01_eda.ipynb` | Executed EDA, 8 sections, embedded plots |
 | `notebooks/02_clustering.ipynb` | Executed sweep + UMAP + findings |
 
@@ -276,7 +335,7 @@ User confirmed expanding the regex to catch both CNN variants (~29.6% coverage).
 
 ## 6. Open Items / Deferred Decisions
 
-1. **Prefix-strip rule at training-data prep time.** The EDA expanded the regex to catch `(CNN) --` and `CITY (CNN) --` (29.6% coverage). The `ALL-CAPS WASHINGTON, ` opening (12.2%) is intentionally left unstripped — standalone city names are often legitimate parts of headlines. We'll need to carry the expanded rule into the `⚙️ Training Environment` prep step when we write the CNN/DM preprocessing for BART labels.
+1. ~~**Prefix-strip rule at training-data prep time.**~~ **Resolved in Training Environment:** the expanded `(CNN) --` / `CITY (CNN) --` regex from the EDA notebook was ported verbatim into `src/preprocessing/cnn_dm_prep.py`. CNN-dateline coverage is ~29.6%; Reuters (0.1%) and bare ALL-CAPS cities (12.2%) intentionally left untouched.
 
 2. **HDBSCAN `min_cluster_size=2` vs `3`.** Current config uses 2 (higher silhouette). If downstream summarization on 2-article clusters produces low-quality outputs in the E2E test, reverting to 3 is the escape hatch.
 
@@ -288,8 +347,16 @@ User confirmed expanding the regex to catch both CNN variants (~29.6% coverage).
 
 6. **HF rate-limit warnings.** Every dataset load prints `"Warning: You are sending unauthenticated requests to the HF Hub"`. Setting `HF_TOKEN` in `.env` would silence these and raise rate limits — not urgent.
 
+7. **Real 50K training-data prep.** Smoke test (5K/500/500) is done locally. The 50K/1K/1K full run happens on Colab at training time (no need to prep locally given the re-prep-on-Colab data flow). If we ever want a local run, `python -m src.preprocessing.cnn_dm_prep` with no flags uses the config defaults.
+
+8. **PyTorch + CUDA verification.** Deferred to the top of the Colab training notebook (`notebooks/04_train_bart_colab.ipynb`) — there's no meaningful way to verify on a MacBook without CUDA. The notebook will begin with a `torch.cuda.is_available()` + GPU-name sanity check.
+
+9. **Checkpoint persistence strategy on Colab.** Colab free-tier sessions die after ~12h and ephemerally. The training notebook will need to mount Google Drive and save checkpoints there, or the work is lost on disconnect. Config flag for this will be added when we build the notebook.
+
+10. **Stage 1 headline quality under training.** Smoke-test inspection showed the sample kept a Reuters dateline inside the headline target. This is consistent with our EDA-driven decision (Reuters is 0.1%, not worth a rule). If Stage 1 learns to emit Reuters datelines at inference time, we'll know the decision was wrong and can add a second regex.
+
 ---
 
 ## 7. Next Section
 
-**⚙️ Training Environment** per the MasterPlan — prepare CNN/Daily Mail training splits, build Stage 1 headline labels (applying the full expanded prefix-strip rule), and build Stage 2 summary labels.
+**🏷️ BART Stage 1 — Headline Generation** per the MasterPlan. Build the training loop (Hugging Face `Seq2SeqTrainer`) inside `src/summarization/trainer.py` and operationalize it via a `notebooks/04_train_bart_colab.ipynb` session on Colab free-tier T4. Smoke test the training loop on the 5K/500/500 data we already prepared, then scale to 50K.
