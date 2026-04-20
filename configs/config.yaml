@@ -80,6 +80,14 @@ summarization:
     fp16: true                       # Mixed-precision training — halves memory, faster on T4
     gradient_checkpointing: true     # Trades compute for memory (recomputes activations in backward)
 
+# --- Generation Parameters (BART inference, Stage 1 + Stage 2) ---
+generation:
+  num_beams: 4
+  min_length: 5                   # Guards against trivial / degenerate outputs
+  length_penalty: 1.0             # Neutral; headlines are short so no bias toward length
+  no_repeat_ngram_size: 3
+  early_stopping: true
+
 # --- Named Entity Recognition (Section 5.6) ---
 ner:
   spacy_model: "en_core_web_trf"

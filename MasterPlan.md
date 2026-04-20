@@ -324,13 +324,16 @@ news_summarization/
 - [x] Update training config for T4 — batch_size 4 (↓ from 8), grad_accum 8 (↑ from 4), fp16, gradient_checkpointing
 
 ### 🏷️ BART Stage 1 — Headline Generation
-- [ ] Implement training loop in trainer.py for Stage 1
-- [ ] Load facebook/bart-large-cnn from Hugging Face
-- [ ] Fine-tune on CNN/Daily Mail headlines (max 30 output tokens)
-- [ ] Monitor training loss and validation loss
-- [ ] Save Stage 1 checkpoint to models/checkpoints/
-- [ ] Evaluate Stage 1 on validation set (ROUGE-1, ROUGE-2, ROUGE-L)
-- [ ] Qualitatively inspect 20–30 generated headlines
+- [x] Implement training loop in trainer.py for Stage 1 (Seq2SeqTrainer; ported into `train_stage1()`)
+- [x] Load facebook/bart-large-cnn from Hugging Face (`load_tokenizer_and_model()`)
+- [x] Build Colab training notebook (`notebooks/04_train_bart_colab.ipynb`) — 11-cell flow, Drive-mounted checkpoints
+- [x] Add generation block to config.yaml (num_beams=4, min_length=5, length_penalty=1.0, no_repeat_ngram_size=3)
+- [x] Local validation — compute_metrics unit test passed with 3 hand-crafted pairs (rouge1=0.34, bertscore_f1=0.92)
+- [ ] Fine-tune on CNN/Daily Mail headlines (max 48 output tokens) — *run on Colab via `04_train_bart_colab.ipynb` cell 8*
+- [ ] Monitor training loss and validation loss — *observed during Colab run*
+- [ ] Save Stage 1 checkpoint to models/checkpoints/ — *auto-saved to Drive at `/content/drive/MyDrive/NewsForge/checkpoints/stage1/`*
+- [ ] Evaluate Stage 1 on validation set (ROUGE-1, ROUGE-2, ROUGE-L, BERTScore F1) — *cell 9 (final full-val eval)*
+- [ ] Qualitatively inspect 20–30 generated headlines — *cell 10 (20 sample headlines with refs)*
 
 ### 📝 BART Stage 2 — Summary Generation
 - [ ] Implement training loop in trainer.py for Stage 2
