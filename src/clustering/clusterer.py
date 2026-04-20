@@ -1,19 +1,23 @@
 """
 Article Clustering Module
 ==========================
-Pipeline Stage: Semantic Clustering (Section 5.3)
+Pipeline Stage: Semantic Clustering (Section 5.3) + Multi-Document
+Input Construction (Section 5.4)
 
-Groups articles covering the same real-world event using unsupervised clustering
-on sentence embeddings:
-- Primary method: HDBSCAN (min_cluster_size=3, metric='cosine')
-- Baseline comparison: K-Means
-- Evaluation: Silhouette Score + manual inspection
-- Singleton clusters and noise points are discarded
+Groups NewsAPI articles covering the same real-world event using unsupervised
+clustering on L2-normalized sentence embeddings:
+- Primary method: HDBSCAN (euclidean on normalized vectors ≡ cosine distance)
+- Baseline: K-Means
+- Quality metric: Silhouette Score on non-noise points
 
-Also handles multi-document input construction (Section 5.4):
-- Concatenates articles within each cluster ordered by publication time
-- Truncates to BART's 1024-token input limit
-- Prioritizes first 2-3 sentences per article for maximum coverage
+Also constructs per-cluster multi-document inputs for BART summarization:
+- Articles ordered by `publishedAt` ascending (insertion-order fallback for nulls)
+- Truncated to 1024 BART tokens using the `facebook/bart-large-cnn` tokenizer
+- Prioritizes leading content from each article by simple round-robin truncation
+  at the whole-article level (keep full articles until budget is exhausted)
+
+Multi-News arrives pre-clustered from the dataset itself, so this module is
+only applied to NewsAPI live-mode input.
 """
 
 import json
@@ -25,6 +29,7 @@ import numpy as np
 import yaml
 from sklearn.cluster import KMeans
 from sklearn.metrics import silhouette_score
+from transformers import AutoTokenizer
 
 
 def load_config(config_path: str = "configs/config.yaml") -> dict:
@@ -33,138 +38,258 @@ def load_config(config_path: str = "configs/config.yaml") -> dict:
         return yaml.safe_load(f)
 
 
+def load_embeddings_and_articles(
+    embeddings_dir: str, processed_newsapi_dir: str
+) -> tuple[np.ndarray, list[dict[str, Any]]]:
+    """Load embeddings.npy and the matching article list (most-recent processed file)."""
+    import glob
+
+    emb_path = os.path.join(embeddings_dir, "embeddings.npy")
+    embeddings = np.load(emb_path)
+
+    processed_files = sorted(
+        glob.glob(os.path.join(processed_newsapi_dir, "articles_*.json")),
+        key=os.path.getmtime,
+    )
+    if not processed_files:
+        raise FileNotFoundError(
+            f"No processed NewsAPI articles in {processed_newsapi_dir}"
+        )
+    with open(processed_files[-1], "r", encoding="utf-8") as f:
+        articles = json.load(f)
+
+    if len(articles) != len(embeddings):
+        raise ValueError(
+            f"Row count mismatch: {len(articles)} articles vs "
+            f"{len(embeddings)} embeddings. Re-run the embedder."
+        )
+    return embeddings, articles
+
+
 def cluster_hdbscan(
     embeddings: np.ndarray,
     min_cluster_size: int = 3,
-    metric: str = "cosine",
 ) -> np.ndarray:
     """
-    Cluster embeddings using HDBSCAN.
+    Cluster L2-normalized embeddings with HDBSCAN (euclidean distance).
 
-    Args:
-        embeddings: NumPy array of shape (n_articles, embedding_dim).
-        min_cluster_size: Minimum number of articles to form a cluster.
-        metric: Distance metric for HDBSCAN.
-
-    Returns:
-        Array of cluster labels (-1 indicates noise/unclustered).
+    On unit-norm vectors, euclidean distance is monotonic with cosine distance:
+        ||x - y||^2 = 2 - 2·cos(x, y)
+    so ordering is preserved.
     """
-    # TODO: Fit HDBSCAN on embeddings
-    # TODO: Return cluster labels
-    pass
+    clusterer = hdbscan.HDBSCAN(
+        min_cluster_size=min_cluster_size,
+        metric="euclidean",
+    )
+    return clusterer.fit_predict(embeddings)
 
 
-def cluster_kmeans(
-    embeddings: np.ndarray,
-    n_clusters: int = 20,
-) -> np.ndarray:
-    """
-    Cluster embeddings using K-Means (baseline comparison).
-
-    Args:
-        embeddings: NumPy array of shape (n_articles, embedding_dim).
-        n_clusters: Number of clusters for K-Means.
-
-    Returns:
-        Array of cluster labels.
-    """
-    # TODO: Fit K-Means on embeddings
-    # TODO: Return cluster labels
-    pass
+def cluster_kmeans(embeddings: np.ndarray, n_clusters: int = 20) -> np.ndarray:
+    """Baseline clustering with K-Means."""
+    km = KMeans(n_clusters=n_clusters, n_init=10, random_state=42)
+    return km.fit_predict(embeddings)
 
 
-def evaluate_clusters(
+def compute_silhouette(
     embeddings: np.ndarray, labels: np.ndarray
-) -> float:
+) -> float | None:
     """
-    Evaluate clustering quality using Silhouette Score.
+    Compute silhouette score on non-noise points.
 
-    Args:
-        embeddings: Article embedding vectors.
-        labels: Cluster assignments.
-
-    Returns:
-        Silhouette score (higher is better, range [-1, 1]).
+    Returns None if fewer than 2 valid clusters exist (silhouette undefined).
     """
-    # TODO: Compute and return silhouette score
-    # TODO: Handle case where all points are noise (labels == -1)
-    pass
+    mask = labels != -1
+    valid_labels = labels[mask]
+    if len(set(valid_labels)) < 2:
+        return None
+    return float(silhouette_score(embeddings[mask], valid_labels, metric="euclidean"))
 
 
 def group_articles_by_cluster(
     articles: list[dict[str, Any]], labels: np.ndarray
 ) -> dict[int, list[dict[str, Any]]]:
-    """
-    Group articles into clusters based on labels.
+    """Bucket articles by cluster label. Excludes noise (-1)."""
+    groups: dict[int, list[dict[str, Any]]] = {}
+    for article, label in zip(articles, labels):
+        label = int(label)
+        if label == -1:
+            continue
+        groups.setdefault(label, []).append(article)
+    return groups
 
-    Args:
-        articles: List of article dictionaries.
-        labels: Cluster assignment for each article.
 
-    Returns:
-        Dictionary mapping cluster_id -> list of articles in that cluster.
-        Noise points (label == -1) and singleton clusters are excluded.
+def sort_cluster_articles(
+    cluster_articles: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
     """
-    # TODO: Group articles by their cluster label
-    # TODO: Discard noise points (label == -1) and singletons
-    pass
+    Sort articles by `publishedAt` ascending, preserving insertion order when
+    timestamps are null or equal.
+    """
+    enumerated = list(enumerate(cluster_articles))
+
+    def sort_key(item):
+        idx, article = item
+        ts = article.get("publishedAt")
+        # Articles with null timestamps sort last while preserving insertion order.
+        return (ts is None, ts or "", idx)
+
+    enumerated.sort(key=sort_key)
+    return [article for _, article in enumerated]
 
 
 def construct_multi_doc_input(
     cluster_articles: list[dict[str, Any]],
+    tokenizer: AutoTokenizer,
     max_tokens: int = 1024,
-    sentences_per_article: int = 3,
 ) -> str:
     """
-    Construct a single input text from a cluster of articles (Section 5.4).
-
-    Articles are ordered by publication time. The first N sentences from each
-    article are concatenated and truncated to the model's max token limit.
-
-    Args:
-        cluster_articles: List of articles in a single cluster.
-        max_tokens: Maximum token count for BART input.
-        sentences_per_article: Number of leading sentences per article.
-
-    Returns:
-        Concatenated, truncated input string for summarization.
+    Concatenate articles within a cluster, ordered by `publishedAt`, truncated
+    to `max_tokens` BART tokens. Articles are joined by a blank line for visual
+    separation in downstream inspection; the summarizer only sees the tokenized
+    form.
     """
-    # TODO: Sort articles by publication time
-    # TODO: Extract first N sentences from each article
-    # TODO: Concatenate and truncate to max_tokens
-    pass
+    ordered = sort_cluster_articles(cluster_articles)
+    running_tokens: list[int] = []
+    joined_parts: list[str] = []
+
+    for article in ordered:
+        text = article.get("text", "")
+        if not text:
+            continue
+        article_ids = tokenizer.encode(text, add_special_tokens=False)
+        if len(running_tokens) + len(article_ids) <= max_tokens:
+            running_tokens.extend(article_ids)
+            joined_parts.append(text)
+        else:
+            remaining = max_tokens - len(running_tokens)
+            if remaining > 0:
+                truncated = tokenizer.decode(
+                    article_ids[:remaining], skip_special_tokens=True
+                )
+                joined_parts.append(truncated)
+            break
+
+    return "\n\n".join(joined_parts)
 
 
-def save_clusters(
-    clusters: dict[int, list[dict[str, Any]]], output_dir: str
-) -> str:
-    """
-    Save cluster assignments and grouped articles to disk.
+def build_cluster_payload(
+    method: str,
+    embeddings: np.ndarray,
+    labels: np.ndarray,
+    articles: list[dict[str, Any]],
+    tokenizer: AutoTokenizer,
+    params: dict[str, Any],
+    max_input_tokens: int,
+) -> dict[str, Any]:
+    """Assemble the final JSON payload for a clustering run."""
+    groups = group_articles_by_cluster(articles, labels)
+    silhouette = compute_silhouette(embeddings, labels)
 
-    Args:
-        clusters: Dictionary mapping cluster_id -> list of articles.
-        output_dir: Path to the clusters data directory.
+    cluster_entries: list[dict[str, Any]] = []
+    for cluster_id in sorted(groups.keys()):
+        cluster_articles = groups[cluster_id]
+        cluster_articles_sorted = sort_cluster_articles(cluster_articles)
+        multi_doc = construct_multi_doc_input(
+            cluster_articles_sorted, tokenizer, max_tokens=max_input_tokens
+        )
+        cluster_entries.append(
+            {
+                "cluster_id": int(cluster_id),
+                "size": len(cluster_articles_sorted),
+                "articles": cluster_articles_sorted,
+                "multi_doc_input": multi_doc,
+            }
+        )
 
-    Returns:
-        Path to the saved JSON file.
-    """
-    # TODO: Save clusters as JSON
-    pass
+    n_noise = int((labels == -1).sum())
+    return {
+        "metadata": {
+            "method": method,
+            "n_clusters": len(cluster_entries),
+            "n_noise": n_noise,
+            "n_articles": int(len(articles)),
+            "silhouette_score": silhouette,
+            "params": params,
+        },
+        "clusters": cluster_entries,
+    }
+
+
+def save_payload(payload: dict[str, Any], output_dir: str, filename: str) -> str:
+    """Save a cluster payload as JSON to `output_dir/filename`."""
+    os.makedirs(output_dir, exist_ok=True)
+    path = os.path.join(output_dir, filename)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2, ensure_ascii=False)
+    return path
 
 
 def main():
-    """Run the full clustering pipeline."""
+    """Run HDBSCAN + K-Means clustering and save cluster payloads."""
     config = load_config()
+    processed_root = config["paths"]["data_processed"]
+    newsapi_dir = os.path.join(processed_root, "newsapi")
 
-    # TODO: Load processed articles and embeddings
-    # TODO: Run HDBSCAN clustering
-    # TODO: Run K-Means clustering (baseline)
-    # TODO: Evaluate both methods with silhouette score
-    # TODO: Group articles by cluster
-    # TODO: Construct multi-document inputs for each cluster
-    # TODO: Save clusters to data/clusters/
-    # TODO: Print summary (number of clusters, articles per cluster, silhouette scores)
-    pass
+    embeddings, articles = load_embeddings_and_articles(
+        config["paths"]["data_embeddings"], newsapi_dir
+    )
+    print(f"Loaded {len(articles)} articles, embeddings shape {embeddings.shape}")
+
+    hdbscan_params = config["clustering"]["hdbscan"]
+    kmeans_params = config["clustering"]["kmeans"]
+
+    print("\nLoading BART tokenizer for multi-doc truncation...")
+    tokenizer = AutoTokenizer.from_pretrained(config["summarization"]["model_name"])
+    max_input_tokens = config["input_construction"]["max_input_tokens"]
+
+    # --- HDBSCAN ---
+    print(f"\nRunning HDBSCAN (min_cluster_size={hdbscan_params['min_cluster_size']})")
+    hdbscan_labels = cluster_hdbscan(
+        embeddings, min_cluster_size=hdbscan_params["min_cluster_size"]
+    )
+    hdbscan_payload = build_cluster_payload(
+        method="hdbscan",
+        embeddings=embeddings,
+        labels=hdbscan_labels,
+        articles=articles,
+        tokenizer=tokenizer,
+        params={
+            "min_cluster_size": hdbscan_params["min_cluster_size"],
+            "metric": "euclidean (on L2-normalized vectors ≡ cosine)",
+        },
+        max_input_tokens=max_input_tokens,
+    )
+    print(
+        f"  clusters={hdbscan_payload['metadata']['n_clusters']}  "
+        f"noise={hdbscan_payload['metadata']['n_noise']}  "
+        f"silhouette={hdbscan_payload['metadata']['silhouette_score']}"
+    )
+
+    # --- K-Means ---
+    print(f"\nRunning K-Means (n_clusters={kmeans_params['n_clusters']})")
+    kmeans_labels = cluster_kmeans(embeddings, n_clusters=kmeans_params["n_clusters"])
+    kmeans_payload = build_cluster_payload(
+        method="kmeans",
+        embeddings=embeddings,
+        labels=kmeans_labels,
+        articles=articles,
+        tokenizer=tokenizer,
+        params={"n_clusters": kmeans_params["n_clusters"]},
+        max_input_tokens=max_input_tokens,
+    )
+    print(
+        f"  clusters={kmeans_payload['metadata']['n_clusters']}  "
+        f"silhouette={kmeans_payload['metadata']['silhouette_score']}"
+    )
+
+    output_dir = config["paths"]["data_clusters"]
+    hdbscan_path = save_payload(hdbscan_payload, output_dir, "newsapi_clusters.json")
+    kmeans_path = save_payload(
+        kmeans_payload, output_dir, "newsapi_clusters_kmeans.json"
+    )
+
+    print(f"\nSaved HDBSCAN payload → {hdbscan_path}")
+    print(f"Saved K-Means payload → {kmeans_path}")
 
 
 if __name__ == "__main__":

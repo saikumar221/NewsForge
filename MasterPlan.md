@@ -302,18 +302,18 @@ news_summarization/
 - [x] Document EDA findings in 01_eda.ipynb (incl. recommendation to raise `stage1.max_output_tokens` from 30 → ~48)
 
 ### 🔢 Embeddings & Clustering
-- [ ] Implement embedder.py using all-MiniLM-L6-v2
-- [ ] Encode article title + first 3 sentences per article
-- [ ] Save embeddings to data/embeddings/
-- [ ] Implement HDBSCAN clustering (clusterer.py)
-- [ ] Implement K-Means as baseline comparison
-- [ ] Tune HDBSCAN parameters (min_cluster_size, metric)
-- [ ] Evaluate cluster quality with Silhouette Score
-- [ ] Manually inspect 20–30 clusters for coherence
-- [ ] Filter singleton clusters and noise points
-- [ ] Save cluster assignments to data/clusters/
-- [ ] Construct multi-document inputs per cluster
-- [ ] Document clustering experiments in 02_clustering.ipynb
+- [x] Implement embedder.py using all-MiniLM-L6-v2 (L2-normalized 384-dim vectors)
+- [x] Encode each article's `text` field (preprocessing already assembles title + description + truncated content)
+- [x] Save embeddings to data/embeddings/ (`embeddings.npy` + `article_index.json`)
+- [x] Implement HDBSCAN clustering (clusterer.py) — euclidean on L2-normalized vectors ≡ cosine
+- [x] Implement K-Means as baseline comparison
+- [x] Tune HDBSCAN parameters via sweep in notebook (`min_cluster_size ∈ {2, 3, 5}`); winner: `mcs=2`
+- [x] Evaluate cluster quality with Silhouette Score (HDBSCAN 0.094 vs K-Means 0.030)
+- [x] Manually inspect clusters for coherence (notebook §7; UMAP 2D plot in §6)
+- [x] Filter singleton clusters and noise points (handled by HDBSCAN `min_cluster_size`)
+- [x] Save cluster assignments to data/clusters/ (`newsapi_clusters.json` primary, K-Means alongside)
+- [x] Construct multi-document inputs per cluster (BART-tokenizer truncation at 1024 tokens, publishedAt-ordered)
+- [x] Document clustering experiments in 02_clustering.ipynb
 
 ### ⚙️ Training Environment
 - [ ] Set up Google Colab Pro or university cluster with GPU
