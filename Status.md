@@ -1,0 +1,295 @@
+# Status.md — Project Journey & Decision Log
+
+**Project:** Event-Centric Multi-Document News Summarization using Transformer Models
+**Course:** CS 6120 — NLP
+**Last updated:** 2026-04-20
+
+This document records every decision, observation, pivot, and finding from the build-out so far. Sections run in the order the work was done, not the order of the final pipeline.
+
+---
+
+## 1. Project Snapshot
+
+### Completed
+- 🛠️ Project Setup (6/6)
+- 📰 News Collection — NewsAPI live mode (4/4)
+- 📥 Multi-News Pipeline Input — primary (5/5)
+- 🧹 Preprocessing — NewsAPI (8/8)
+- 📊 CNN/Daily Mail EDA (6/6)
+- 🔢 Embeddings & Clustering (12/12)
+
+### Not started
+- ⚙️ Training Environment · 🏷️ BART Stage 1 · 📝 BART Stage 2 · 📚 Supplementary Fine-Tuning · 🔁 End-to-End Pipeline Test · 🏷️ NER · 🖥️ Streamlit UI · 🔬 Ablation Studies · 📏 Automatic Evaluation · 👤 Human Evaluation · 🔍 Error Analysis · 📄 Final Report · 🎤 Presentation & Demo
+
+---
+
+## 2. Major Architectural Pivots
+
+These changed the shape of the whole project.
+
+### Pivot A: NewsAPI free tier truncates content
+**Problem:** NewsAPI's free tier caps `content` at ~200 characters with a `[+N chars]` marker. The MasterPlan's "filter articles <100 words" rule would kill almost every article, because truncation makes articles look short regardless of their true length.
+
+**Options considered:**
+- Switch to NewsData.io → rejected (same truncation under the hood on free tier)
+- Scrape full text via `trafilatura` → rejected (scope, paywall failures)
+- Upgrade paid tier ($449/mo) → rejected (cost)
+
+**Resolution:** Keep NewsAPI as *optional live mode*; shift the *primary pipeline input* to a different dataset.
+
+### Pivot B: Adopt a three-dataset hybrid (Option 3)
+Instead of one dataset for everything, we assigned distinct roles:
+
+| Dataset | Role | Why |
+|---------|------|-----|
+| **CNN/Daily Mail** | BART training corpus | Labeled (article → headline + highlights) pairs for Stage 1 & Stage 2 |
+| **Multi-News** | Primary pipeline input & eval | Pre-grouped event clusters (2–10 articles each) with a human-written reference summary per cluster. Full article text, not truncated. |
+| **NewsAPI** | Optional live mode | Today's articles; requires our HDBSCAN clustering step before summarization |
+
+**Consequence:** The "Semantic Clustering" stage only applies to NewsAPI; Multi-News arrives pre-clustered. End-to-end ROUGE/BERTScore can now be computed on the multi-doc pipeline against real reference summaries (not only the single-doc CNN/DM training target).
+
+**Updates made:** Rewrote §2 Objectives, §3 Pipeline Architecture, §5.1 Data Sources (split into 5.1.1 Multi-News / 5.1.2 NewsAPI / 5.1.3 CNN-DM), §5.7 Ablations (reframed around Multi-News; added bonus Ablation 3), §6 Evaluation (dual reference-set table), §9 Todo List (new "📥 Multi-News Pipeline Input" section; renamed News Collection to "Live Mode").
+
+---
+
+## 3. Section-by-Section Journey
+
+### 🛠️ Project Setup
+
+- `.venv` created with `python3 -m venv .venv`
+- All `requirements.txt` deps installed (torch, transformers, datasets, sentence-transformers, hdbscan, scikit-learn, spacy, rouge-score, bert-score, newsapi-python, streamlit, PyYAML, python-dotenv, numpy, pandas)
+- `.env` initially contained a NewsData.io-format key (`pub_...`); user obtained a real NewsAPI.org key and updated it
+- `MasterPlan.md` and `README.md` were untracked at session start; `Add Project structure` was the only prior commit
+- No code written — just verification
+
+### 📰 News Collection (NewsAPI Live Mode)
+
+**Decisions**
+| Q | Answer |
+|---|--------|
+| Categories | All 7 NewsAPI categories (business, entertainment, general, health, science, sports, technology). [config.yaml](configs/config.yaml) originally listed only 6 — added `sports`. |
+| Country filter | `us` |
+| Page size | 100 (free tier max) |
+| Mode | One-shot script |
+| Dedup | By URL |
+| Output | Timestamped JSON in `data/raw/` |
+
+**What was built:** [src/collection/news_fetcher.py](src/collection/news_fetcher.py)
+- `init_client` · `fetch_articles_by_category` · `fetch_all_categories` · `save_raw_articles` · `summarize_source_diversity` · `main`
+
+**Run results:**
+- 340 unique articles across all 7 categories
+- 203 unique sources (strong diversity)
+- ~20 duplicates removed by URL dedup
+- Max per-source concentration: 9 articles (Space.com)
+- Saved to `data/raw/articles_20260419T022342Z.json`
+
+### 📥 Multi-News Pipeline Input (Primary)
+
+**Dataset access surprise:** The official `alexfabbri/multi_news` and `tau/multi_news` HuggingFace repos use old-style dataset scripts that the current `datasets` library no longer supports (`RuntimeError: Dataset scripts are no longer supported`). The JSONL mirror `nlplabtdtu/multi_news_en` turned out to be single-article — defeats the purpose. Settled on **`tingchih/multi_news_doc`** (parquet format, 5,622 test rows, proper multi-doc structure), accessed via `hf_hub_download` + `pandas.read_parquet`.
+
+**Decisions**
+| Q | Answer |
+|---|--------|
+| Subset size | 300 clusters from test split |
+| Cluster size filter | None |
+| Output format | Single `clusters.json` in `data/processed/multi_news/` |
+| Pseudo-title | None (no title field — embedder gets the lead paragraph instead) |
+| Summary prefix `– ` | Stripped during loading |
+
+**What was built:** [src/collection/multinews_loader.py](src/collection/multinews_loader.py)
+- `download_split`, `load_split_dataframe`, `parse_cluster`, `load_clusters`, `save_clusters`, `summarize_clusters`, `main`
+
+**Run results:**
+- 300 clusters saved
+- articles/cluster: min=1, max=8, mean=2.8, median=2
+- chars/cluster: min=618, max=163,507, mean=10,829
+- summary words/cluster: min=68, max=461, mean=213.9
+- Cluster size distribution: 2→158, 3→81, 4→36, 5→12, 6→8, 7→2, 8→1, 1→2
+- En-dash prefix verified stripped (first char is natural text, not U+2013)
+
+### 🧹 Preprocessing (NewsAPI Live Mode)
+
+**Data observations from raw sample:**
+- `content` always truncated to ~200 chars with `[+N chars]` marker
+- Titles carry source suffixes: `" - Deadline"`, `" - TechCrunch"`, `" — The Washington Post"`
+- Unicode smart quotes, `\r\n`, em-dashes, `…` ellipses throughout
+- Paywall previews like FT: *"Then $75 per month. Complete digital access..."*
+
+**Decisions**
+| Q | Answer |
+|---|--------|
+| Input file | Most-recent in `data/raw/` |
+| Schema | Keep `title / description / content / text / url / publishedAt / source / category / author`; add `word_count`, `is_paywall_preview`; drop `urlToImage` |
+| 100-word filter | Dropped; replaced with soft ≥20-word minimum on `text` |
+| Paywall handling | Flag, don't drop |
+| Title suffix strip | Only when matches `source.name` |
+| Working `text` field | `title + description + content` with smart dedup (skip description if prefix of content) |
+
+**What was built:** [src/preprocessing/cleaner.py](src/preprocessing/cleaner.py)
+- `find_latest_raw_file`, `strip_truncation_marker`, `normalize_text`, `strip_title_suffix`, `is_paywall_preview`, `assemble_text`, `clean_article`, `process_articles`, `save_processed_articles`, `main`
+
+**Run results & bug fix:**
+- 340 → 335 articles kept (5 dropped for <20 words)
+- Word counts: min=20, p25=52, median=63, p75=72, max=102
+- **Initial paywall detection missed the FT article** (52-word combined text > 50-word threshold). Fixed by running the heuristic on `content` alone instead of the full combined `text`. Paywall count jumped from 1 → 6 (FT, Air Current, Vox, 2× NBC News, 404 Media — mostly legitimate catches).
+- Residue check: 0 smart-quotes, 0 unicode-ellipses, 0 `[+N chars]` markers, 0 CRLF in final `text` fields
+
+### 📊 CNN/Daily Mail EDA
+
+**Decisions**
+| Q | Answer |
+|---|--------|
+| Sample size | First 5K per split (15K total, deterministic) |
+| Headline source | First line of article, strip `(CNN) --` prefix (later expanded to also catch `CITY (CNN) --`) |
+| Summary target | Full highlights, `\n` → space |
+| Notebook format | Runnable inline code |
+
+**Major findings**
+
+🔴 **Finding 1 — CNN/DM v3.0.0 articles have zero newlines.**
+`article.split('\n', 1)[0]` returned the whole article. We switched from "first line" to **first sentence** via a regex sentence-boundary split (`(?<=[.!?])\s+(?=[A-Z0-9"\'])`).
+
+🔴 **Finding 2 — Stage 1 output budget was too small.**
+Derived headline word counts: p50=25, p95=40, p99=53. At roughly 1.3× words/token, p50 headlines are already 30-35 tokens. Our `stage1.max_output_tokens: 30` was clipping the **median** headline. **Raised to 48.**
+
+**Prefix frequency across 15K articles:**
+| Pattern | Count | % | Stripped? |
+|---------|-------|---|-----------|
+| `CITY (CNN) -- ` | 2,383 | 15.9% | ✅ (after expansion) |
+| `(CNN) -- ` plain | 2,057 | 13.7% | ✅ |
+| ALL-CAPS opening | 1,829 | 12.2% | ❌ (legitimate datelines) |
+| `CITY (Reuters) -- ` | 14 | 0.1% | ❌ (too rare) |
+
+User confirmed expanding the regex to catch both CNN variants (~29.6% coverage). Final regex: `^\s*(?:[A-Z][A-Za-z .,'\-]{1,40})?\(CNN\)\s*--\s*`
+
+**Length observations**
+| Field | p50 | p75 | p90 | p95 | p99 |
+|-------|-----|-----|-----|-----|-----|
+| article (words) | 512 | 777 | 1039 | 1231 | 1577 |
+| highlights / summary_target | 45 | 53 | 64 | 74 | 98 |
+| headline (derived) | 25 | 31 | 36 | 40 | 53 |
+
+**Implications for config:** `max_input_tokens: 1024` OK (truncates, standard). `stage2.max_output_tokens: 128` has headroom. `stage1.max_output_tokens` raised 30→48.
+
+**NewsAPI secondary EDA** (included in the same notebook for the bonus scope noted in the original plan): 7 categories populated, 201 unique sources, `text` field median 63 words, 6 paywall-flagged.
+
+**Build/infra:** Installed `nbconvert`, `ipykernel`, `nbformat`; registered the `newsforge` IPython kernel; added matplotlib + Jupyter packages to [requirements.txt](requirements.txt).
+
+**Deliverable:** [notebooks/01_eda.ipynb](notebooks/01_eda.ipynb) — executed, 8 sections, embedded plots, findings cell.
+
+### 🔢 Embeddings & Clustering
+
+**Scope:** NewsAPI only. Multi-News arrives pre-clustered.
+
+**Decisions**
+| Q | Answer |
+|---|--------|
+| Snippet source | `text` field (already assembled in preprocessing) |
+| HDBSCAN strategy | Sweep `min_cluster_size ∈ {2, 3, 5}` in notebook; pick best by silhouette; `clusterer.py` reads config |
+| Visualization | UMAP 2D |
+| Multi-doc ordering | `publishedAt` asc, insertion-order fallback for nulls |
+| Multi-News embeddings | Skipped (only needed for bonus Ablation 3) |
+| Output schema | Top-level metadata block + list of cluster entries (silhouette is global, stored in metadata) |
+
+**Technical choice:** To use cosine distance with HDBSCAN efficiently, we L2-normalize embeddings and run HDBSCAN with `metric='euclidean'`. On unit-norm vectors `‖x−y‖² = 2 − 2·cos(x,y)`, so euclidean distance is monotonic with cosine distance — ordering is preserved.
+
+**Build/infra:** Installed `umap-learn`; added to [requirements.txt](requirements.txt). BART tokenizer (`facebook/bart-large-cnn`, ~450MB) downloaded at runtime for multi-doc truncation.
+
+**What was built**
+- [src/embeddings/embedder.py](src/embeddings/embedder.py) — Sentence Transformer encoding, L2-normalization, saves `embeddings.npy` + `article_index.json`
+- [src/clustering/clusterer.py](src/clustering/clusterer.py) — HDBSCAN + K-Means + silhouette + multi-doc input construction with BART-tokenizer truncation
+- [notebooks/02_clustering.ipynb](notebooks/02_clustering.ipynb) — sweep, method comparison, UMAP plot, top-cluster inspection, findings
+
+**Embedder run:**
+- 335 articles → (335, 384) float32 vectors
+- L2-norm mean = 1.0000 (confirms normalization)
+
+**Sweep results:**
+| method | clusters | noise | silhouette |
+|--------|----------|-------|-----------|
+| **HDBSCAN (mcs=2) — winner** | 21 | 198 (59%) | **0.094** |
+| HDBSCAN (mcs=3) | 9 | 219 (65%) | 0.077 |
+| HDBSCAN (mcs=5) | 4 | 233 (70%) | 0.067 |
+| K-Means (k=20) | 20 | 0 | 0.030 |
+
+**Decision:** [config.yaml](configs/config.yaml) updated `min_cluster_size: 3 → 2` per sweep winner. **Caveat noted in findings:** silhouette-optimal ≠ semantically-optimal. Smaller clusters naturally have tighter intra-cluster distances, inflating silhouette. If downstream summaries on mcs=2's 2-article clusters feel weak, reverting to mcs=3 is reasonable.
+
+**Coherence inspection** (visibly good on larger clusters):
+- NFL draft (15 articles), space/physics/cosmology (15), Middle East/oil/markets (16), NHL/NBA playoffs (8), iOS/Apple (4), paleontology/fossils (11)
+- One large "rest bucket" cluster mixing science-adjacent general interest topics — common HDBSCAN failure mode on small datasets
+
+**Noise rate (59%) is expected** for NewsAPI top-headlines: most articles cover unique events with no second article to pair with.
+
+**Multi-doc input construction:** For each cluster, articles are sorted by `publishedAt` ascending (null timestamps sort last with insertion-order preserved), concatenated with blank-line separators, and truncated using the BART tokenizer to 1024 tokens. Whole articles are kept until the budget is exhausted; the overflow article is tokenized-truncated rather than word-truncated for accuracy.
+
+**Output saved to** `data/clusters/newsapi_clusters.json` (HDBSCAN, primary) and `data/clusters/newsapi_clusters_kmeans.json` (K-Means, comparison only).
+
+---
+
+## 4. Config & Infra Changes
+
+### [configs/config.yaml](configs/config.yaml)
+| Change | Before | After |
+|--------|--------|-------|
+| `newsapi.categories` | 6 (no sports) | 7 (adds sports) |
+| `newsapi.country` | — | `us` |
+| `multinews.*` | — | Added full block (repo, split, subset_size=300, separator, summary_prefix) |
+| `paths.data_multinews` | — | `data/processed/multi_news` |
+| `summarization.stage1.max_output_tokens` | 30 | 48 (EDA finding) |
+| `clustering.hdbscan.min_cluster_size` | 3 | 2 (sweep winner) |
+| `clustering.hdbscan.metric` | `"cosine"` (label) | clarifying comment: implemented as euclidean on L2-normalized vectors |
+
+### [requirements.txt](requirements.txt) additions
+- `umap-learn` (clustering viz)
+- `matplotlib` (was a transitive dep; made explicit)
+- `nbconvert`, `nbformat`, `ipykernel` (notebook execution)
+
+### [MasterPlan.md](MasterPlan.md)
+- Replaced 4-week timeline (§9) with the user's task-based todo list
+- §1 Project Overview: unchanged (still describes the system honestly)
+- §2 Objectives: rewrote obj #1 for the hybrid; added "Dataset Roles" table
+- §3 Pipeline diagram: updated Data Ingestion box (dual source); noted clustering is NewsAPI-only
+- §5.1 Data Sources: split into 5.1.1 (Multi-News primary), 5.1.2 (NewsAPI live mode), 5.1.3 (CNN-DM training)
+- §5.5 Stage 1: max output tokens 30 → 48
+- §5.7 Ablations: reframed Ablation 2 around Multi-News pre-grouped clusters; added bonus Ablation 3 (gold vs HDBSCAN clusters)
+- §6 Evaluation: added dual reference-set table (CNN-DM for single-doc, Multi-News for multi-doc)
+- §9 Todo List: tracks completed items per section
+
+---
+
+## 5. Artifacts Produced
+
+| Path | Contents |
+|------|----------|
+| `data/raw/articles_20260419T022342Z.json` | 340 raw NewsAPI articles |
+| `data/processed/newsapi/articles_20260419T205819Z.json` | 335 cleaned, paywall-flagged articles |
+| `data/processed/multi_news/clusters.json` | 300 Multi-News test clusters |
+| `data/embeddings/embeddings.npy` | (335, 384) L2-normalized vectors |
+| `data/embeddings/article_index.json` | Row → URL/title mapping |
+| `data/clusters/newsapi_clusters.json` | HDBSCAN payload (21 clusters + metadata) |
+| `data/clusters/newsapi_clusters_kmeans.json` | K-Means baseline |
+| `notebooks/01_eda.ipynb` | Executed EDA, 8 sections, embedded plots |
+| `notebooks/02_clustering.ipynb` | Executed sweep + UMAP + findings |
+
+---
+
+## 6. Open Items / Deferred Decisions
+
+1. **Prefix-strip rule at training-data prep time.** The EDA expanded the regex to catch `(CNN) --` and `CITY (CNN) --` (29.6% coverage). The `ALL-CAPS WASHINGTON, ` opening (12.2%) is intentionally left unstripped — standalone city names are often legitimate parts of headlines. We'll need to carry the expanded rule into the `⚙️ Training Environment` prep step when we write the CNN/DM preprocessing for BART labels.
+
+2. **HDBSCAN `min_cluster_size=2` vs `3`.** Current config uses 2 (higher silhouette). If downstream summarization on 2-article clusters produces low-quality outputs in the E2E test, reverting to 3 is the escape hatch.
+
+3. **Multi-News subset size.** We're using 300 clusters for dev / iteration. Final evaluation should probably use a larger slice (1K–full 5.6K test split) for paper-comparable numbers.
+
+4. **Multi-News embeddings.** Skipped. If we do Ablation 3 (gold vs HDBSCAN clusters on Multi-News), we'll need to embed + cluster Multi-News articles too.
+
+5. **Paywall-flagged articles.** Currently kept in the dataset with `is_paywall_preview: true`. Downstream pipeline can choose to include or exclude; the E2E test will tell us which.
+
+6. **HF rate-limit warnings.** Every dataset load prints `"Warning: You are sending unauthenticated requests to the HF Hub"`. Setting `HF_TOKEN` in `.env` would silence these and raise rate limits — not urgent.
+
+---
+
+## 7. Next Section
+
+**⚙️ Training Environment** per the MasterPlan — prepare CNN/Daily Mail training splits, build Stage 1 headline labels (applying the full expanded prefix-strip rule), and build Stage 2 summary labels.
