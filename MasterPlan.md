@@ -124,7 +124,7 @@ The project uses three datasets with distinct, non-overlapping roles.
 #### Stage 1 — Headline Generation
 - **Model:** `facebook/bart-large-cnn`
 - **Input:** Article/cluster text (max 1024 tokens)
-- **Output:** Single headline (max 30 tokens)
+- **Output:** Single headline (max 48 tokens)
 - **Target:** Original CNN/Daily Mail headlines
 
 #### Stage 2 — Summary Generation
@@ -143,7 +143,7 @@ The project uses three datasets with distinct, non-overlapping roles.
 | Gradient Accumulation Steps | 4 |
 | Epochs | 3 |
 | Max Input Tokens | 1024 |
-| Max Output Tokens (headline) | 30 |
+| Max Output Tokens (headline) | 48 |
 | Max Output Tokens (summary) | 128 |
 | Hardware | Google Colab Pro (A100) or university cluster |
 
@@ -294,12 +294,12 @@ news_summarization/
 - [x] Save processed articles to data/processed/newsapi/
 
 ### 📊 CNN/Daily Mail EDA
-- [ ] Load CNN/Daily Mail dataset via Hugging Face
-- [ ] Analyze article and summary length distributions
-- [ ] Inspect headline and highlight quality
-- [ ] Construct headline targets from metadata
-- [ ] Concatenate highlights into 2–3 sentence summary targets
-- [ ] Document EDA findings in 01_eda.ipynb
+- [x] Load CNN/Daily Mail dataset via Hugging Face (`abisee/cnn_dailymail` v3.0.0)
+- [x] Analyze article and summary length distributions (15K sample: 5K × train/val/test)
+- [x] Inspect headline and highlight quality (sample inspection + prefix frequency analysis)
+- [x] Construct headline targets = first **sentence** of article with `(CNN) -- ` + `CITY (CNN) -- ` dateline strip (finding: articles have no newlines in v3.0.0; rule covers ~29.6% of articles)
+- [x] Concatenate highlights into summary targets (newlines → spaces)
+- [x] Document EDA findings in 01_eda.ipynb (incl. recommendation to raise `stage1.max_output_tokens` from 30 → ~48)
 
 ### 🔢 Embeddings & Clustering
 - [ ] Implement embedder.py using all-MiniLM-L6-v2

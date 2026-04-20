@@ -29,5 +29,11 @@ python-dotenv
 numpy
 pandas
 
+# EDA / Notebooks
+matplotlib
+nbconvert
+nbformat
+ipykernel
+
 # Optional: Experiment Tracking
 # wandb

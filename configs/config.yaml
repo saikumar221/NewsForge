@@ -52,7 +52,7 @@ summarization:
   # Stage 1 — Headline Generation
   stage1:
     max_input_tokens: 1024
-    max_output_tokens: 30
+    max_output_tokens: 48       # Raised from 30 per EDA findings (p50 headline ≈ 30 tokens, p95 ≈ 50)
 
   # Stage 2 — Summary Generation
   stage2:
