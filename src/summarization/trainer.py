@@ -165,34 +165,51 @@ def build_training_args(
     output_dir: str,
     logging_dir: str | None = None,
 ):
-    """Build a `Seq2SeqTrainingArguments` from our YAML config layout."""
+    """
+    Build a `Seq2SeqTrainingArguments` from our YAML config layout.
+
+    transformers has churn across major versions (e.g., 5.0 removed
+    `overwrite_output_dir` and `save_safetensors`). Rather than maintain a
+    version matrix, this function introspects the installed class signature
+    and silently drops kwargs it does not accept — printing which ones were
+    dropped, so version-skew surprises stay visible.
+    """
+    import inspect
+
     from transformers import Seq2SeqTrainingArguments
 
-    return Seq2SeqTrainingArguments(
-        output_dir=output_dir,
-        num_train_epochs=training_cfg["epochs"],
-        per_device_train_batch_size=training_cfg["batch_size"],
-        per_device_eval_batch_size=training_cfg["batch_size"],
-        gradient_accumulation_steps=training_cfg["gradient_accumulation_steps"],
-        learning_rate=float(training_cfg["learning_rate"]),
-        warmup_steps=training_cfg["warmup_steps"],
-        fp16=training_cfg.get("fp16", False),
-        gradient_checkpointing=training_cfg.get("gradient_checkpointing", False),
-        eval_strategy="epoch",
-        save_strategy="epoch",
-        save_total_limit=2,
-        load_best_model_at_end=True,
-        metric_for_best_model="bertscore_f1",
-        greater_is_better=True,
-        predict_with_generate=True,
-        generation_max_length=stage_cfg["max_output_tokens"],
-        generation_num_beams=generation_cfg["num_beams"],
-        logging_dir=logging_dir or os.path.join(output_dir, "logs"),
-        logging_steps=50,
-        report_to="none",
-        # Keep Drive I/O polite — don't ping every step
-        save_safetensors=True,
-    )
+    desired: dict[str, Any] = {
+        "output_dir": output_dir,
+        "num_train_epochs": training_cfg["epochs"],
+        "per_device_train_batch_size": training_cfg["batch_size"],
+        "per_device_eval_batch_size": training_cfg["batch_size"],
+        "gradient_accumulation_steps": training_cfg["gradient_accumulation_steps"],
+        "learning_rate": float(training_cfg["learning_rate"]),
+        "warmup_steps": training_cfg["warmup_steps"],
+        "fp16": training_cfg.get("fp16", False),
+        "gradient_checkpointing": training_cfg.get("gradient_checkpointing", False),
+        "eval_strategy": "epoch",
+        "save_strategy": "epoch",
+        "save_total_limit": 2,
+        "load_best_model_at_end": True,
+        "metric_for_best_model": "bertscore_f1",
+        "greater_is_better": True,
+        "predict_with_generate": True,
+        "generation_max_length": stage_cfg["max_output_tokens"],
+        "generation_num_beams": generation_cfg["num_beams"],
+        "logging_dir": logging_dir or os.path.join(output_dir, "logs"),
+        "logging_steps": 50,
+        "report_to": "none",
+        "save_safetensors": True,  # Defaults to True in transformers >=5.0 anyway
+    }
+
+    sig_params = inspect.signature(Seq2SeqTrainingArguments.__init__).parameters
+    accepted = {k: v for k, v in desired.items() if k in sig_params}
+    dropped = sorted(set(desired) - set(accepted))
+    if dropped:
+        print(f"[build_training_args] Dropping unsupported kwargs for this transformers version: {dropped}")
+
+    return Seq2SeqTrainingArguments(**accepted)
 
 
 # --- Main training orchestration ----------------------------------------------------
