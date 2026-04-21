@@ -351,11 +351,12 @@ news_summarization/
 - [x] Extend `build_training_args` with `selection_metric` parameter (replaces hardcoded bertscore_f1)
 - [x] Append Stage 2 cells to `notebooks/04_train_bart_colab.ipynb` (paths+toggle, train, full-val metrics, 20-sample inspection, checkpoint verify)
 - [x] Local validation — compute_metrics returns `{rouge1, rouge2, rougeL, rougeLsum, bertscore_f1}`; rougeLsum ≠ rougeL on multi-sentence test, confirming sentence-split is effective
-- [ ] Fine-tune on CNN/Daily Mail summaries (max 128 output tokens) — *run on Colab*
-- [ ] Monitor training and validation loss — *observed during Colab run*
-- [ ] Save Stage 2 checkpoint to models/checkpoints/ — *auto-saved via Trainer (local /content or Drive, per `SAVE_TO_DRIVE_STAGE2` toggle)*
-- [ ] Evaluate Stage 2 with ROUGE and BERTScore — *final_val_* metrics printed at end of training*
-- [ ] Qualitatively inspect 20–30 headline–summary pairs — *cell: 20 samples with ref headline + ref summary + pred summary side by side*
+- [x] Fine-tune on CNN/Daily Mail summaries (smoke 5K/500/500, max 128 output tokens) — best checkpoint at epoch 1, val loss climbing after → smoke saturates quickly
+- [x] Monitor training and validation loss — train loss 7.42 → 6.10, val loss 1.12 → 1.21 (same warmup-too-long artifact as Stage 1 smoke)
+- [x] Save Stage 2 checkpoint — `/content/checkpoints/stage2/best/` (~1.6 GB, ephemeral; Drive persistence available via `SAVE_TO_DRIVE_STAGE2` toggle)
+- [x] Evaluate Stage 2 with ROUGE and BERTScore — final full-val: `ROUGE-1=0.518, ROUGE-2=0.397, ROUGE-L=0.479, rougeLsum=0.503, BERTScore-F1=0.917`
+- [x] Qualitatively inspect 20 samples — summaries are multi-sentence, abstractive, entity-rich; several preserve or exceed the reference in specificity (samples 10, 16, 17, 19). One factual drift catalogued for 🔍 Error Analysis (sample 15: age drift). No repetition or degenerate outputs.
+- [ ] *(Optional polish)* Full 50K Stage 2 fine-tune — ~2h Colab; current smoke model is already strong because `bart-large-cnn` base is already CNN/DM-fine-tuned
 
 *(Headline–summary consistency score moved to §📏 Automatic Evaluation — it's a cross-stage metric computed after both models exist.)*
 

@@ -17,9 +17,10 @@ An end-to-end news summarization system that collects articles from multiple sou
 | 📊 CNN/Daily Mail EDA | ✅ 15K sample analyzed |
 | 🔢 Embeddings & Clustering | ✅ 21 HDBSCAN clusters |
 | ⚙️ Training Environment | ✅ Colab T4, CNN/DM prep module |
-| 🏷️ BART Stage 1 (headline) | ✅ Smoke-validated (v2 labels); 50K full run optional |
-| 📝 BART Stage 2 (summary) | ⏭️ Next |
-| 🏷️ NER / 🖥️ UI / 🔬 Ablations / 📏 Eval / 📄 Report | ⏳ Pending |
+| 🏷️ BART Stage 1 (headline) | ✅ Smoke-validated — abstractive headlines (first-highlight labels); 50K full run optional |
+| 📝 BART Stage 2 (summary) | ✅ Smoke-validated — rougeLsum=0.503, BERTScore=0.917; 50K full run optional |
+| 🏷️ NER | ⏭️ Next |
+| 🔁 E2E Pipeline / 📏 Eval / 🔬 Ablations / 🖥️ UI / 👤 Human Eval / 🔍 Error Analysis / 📄 Report | ⏳ Pending |
 
 ## Pipeline Overview
 

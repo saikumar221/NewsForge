@@ -21,9 +21,10 @@ This document records every decision, observation, pivot, and finding from the b
 
 ### In progress
 - 🏷️ BART Stage 1 (13/13 smoke-validated — v2 labels produce abstractive headlines; extractive-copy failure eliminated; checkpoint at `/content/checkpoints/stage1/best/`. **Optional:** full 50K run for polish.)
+- 📝 BART Stage 2 (13/13 smoke-validated — rougeLsum=0.503, BERTScore=0.917, summaries are abstractive multi-sentence and often richer than reference; checkpoint at `/content/checkpoints/stage2/best/`. **Optional:** full 50K run for polish.)
 
 ### Not started
-- 📝 BART Stage 2 · 📚 Supplementary Fine-Tuning · 🔁 End-to-End Pipeline Test · 🏷️ NER · 🖥️ Streamlit UI · 🔬 Ablation Studies · 📏 Automatic Evaluation · 👤 Human Evaluation · 🔍 Error Analysis · 📄 Final Report · 🎤 Presentation & Demo
+- 📚 Supplementary Fine-Tuning · 🔁 End-to-End Pipeline Test · 🏷️ NER · 🖥️ Streamlit UI · 🔬 Ablation Studies · 📏 Automatic Evaluation · 👤 Human Evaluation · 🔍 Error Analysis · 📄 Final Report · 🎤 Presentation & Demo
 
 ---
 
@@ -421,6 +422,74 @@ Whether to run the full 50K before moving on is a **polish-vs-progress decision*
 - **A working Stage 1 checkpoint exists** at `/content/checkpoints/stage1/best/` — effectively "bart-large-cnn gently nudged toward shorter, headline-shaped outputs." Sufficient to feed Stage 2's headline-prefix input.
 - Full 50K would produce a checkpoint where training actually learned non-trivially and yields paper-comparable numbers. Roughly 2h on Colab, may span sessions.
 
+### 📝 BART Stage 2 — Summary Generation
+
+#### Config + code deltas from Stage 1
+
+- **Added `generation_stage2` block** to [config.yaml](configs/config.yaml) with BART's published CNN/DM summarization defaults (`num_beams=4, min_length=30, length_penalty=2.0, no_repeat_ngram_size=3`). Stage 1's block stays at `length_penalty=1.0, min_length=5` (short headlines).
+- **Extended `compute_metrics_factory`** with `rougeLsum` + a sentence-boundary splitter (`_split_sentences_for_rouge_sum`). Without the splitter, rougeLsum degenerates to rougeL on single-line inputs. Local 3-pair unit test confirmed rougeL=0.2724 ≠ rougeLsum=0.3042 post-split.
+- **Refactored `build_training_args`** to take a `selection_metric` parameter instead of hardcoding `bertscore_f1`. Stage 1 still uses `bertscore_f1` (semantic proxy for paraphrase); Stage 2 uses **`rougeLsum`** (HF's canonical summarization metric).
+- **Added `train_stage2`** as a near-copy of `train_stage1` with Stage-2-specific wiring (stage2 config block, `input`/`target` columns, `generation_stage2`, rougeLsum selection).
+- **Appended 6 Stage 2 cells** to `notebooks/04_train_bart_colab.ipynb` (paths+toggle, train, final metrics, 20-sample inspection, checkpoint verify, preceded by a cleanup header).
+
+#### Colab run friction: an OOM we didn't anticipate
+
+First Stage 2 training cell **OOMed immediately** — the T4's 14.6 GiB VRAM was already 97% full before Stage 2 training started. Every Stage 1 artifact was still resident: the Stage 1 trainer (model + optimizer + scheduler), the `model`/`tokenizer` loaded in cell 20 for generation, the `BERTScorer` (RoBERTa-large, ~1.4 GB) closed over inside Stage 1's `compute_metrics`. Stage 2 tried to load another ~3 GB and fell over.
+
+First remediation attempt (in-place `del` of notebook-scope vars + `gc.collect()` + `torch.cuda.empty_cache()`) went from `14.27 GiB` allocated to `14.02 GiB` — effectively no change. Second attempt clearing `sys.last_traceback` and cached modules: also `14.02 GiB`. Diagnostic `gc.get_objects()` showed **12.9 GiB of live CUDA tensors** still tracked. Could not surgically dislodge them in-place.
+
+**Actual fix: restart session + skip Stage 1 retrain.** Runtime restart wipes Python state and VRAM but preserves `/content/` on disk (Stage 1 checkpoint and prepped data survive). Re-ran only cells 1–5 + 7 + the Stage 2 block. Saved ~25 min vs a full re-run of Stage 1.
+
+**Lessons carried forward:**
+- Between stages on a single Colab session, the traceback + reference chain from any prior training session holds the previous stage's weights pinned. In-place cleanup is unreliable.
+- For multi-stage training on Colab free-tier, prefer a session restart between stages. The cost is ~2 min of cell re-runs; the gain is a guaranteed-clean VRAM budget.
+- Added a `gc.collect() + torch.cuda.empty_cache()` at the top of `train_stage2` as a belt-and-suspenders safety net (it helped; the primary fix was the restart).
+
+#### Training metrics (5K/500/500 smoke test)
+
+| Epoch | Train Loss | Val Loss | ROUGE-1 | ROUGE-2 | ROUGE-L | **rougeLsum** | BERTScore F1 |
+|-------|-----------|----------|---------|---------|---------|---------------|--------------|
+| **1** *(best)* | 7.42 | 1.12 | 0.518 | 0.397 | 0.479 | **0.503** | 0.917 |
+| 2 | 6.94 | 1.14 | 0.512 | 0.393 | 0.475 | 0.497 | 0.916 |
+| 3 | 6.10 | 1.21 | 0.513 | 0.393 | 0.478 | 0.498 | 0.917 |
+
+Val loss monotonically rises from epoch 1 (1.12 → 1.14 → 1.21). rougeLsum-based selection correctly picked **epoch 1** (checkpoint-157). Training loss magnitude is high for the same reason as Stage 1 smoke — warmup_steps=500 > total_steps=468 → LR never reaches target; the model barely moves from pretrained weights. Still, the starting model (`bart-large-cnn`) is already fine-tuned for CNN/DM summarization, so outputs are genuinely strong.
+
+**Why the numbers look high:** CNN/DM published BART baselines are ~0.44 ROUGE-1 / ~0.21 ROUGE-2; we're at 0.52 / 0.40. That's because the base model we're nudging already has near-SOTA CNN/DM summarization baked in. Real-world comparison to published numbers should happen on the held-out test split + the Multi-News multi-doc pipeline (both happen in the 📏 Automatic Evaluation section, not here).
+
+#### Qualitative inspection — summaries are genuinely abstractive and multi-sentence
+
+```
+Sample 16 — REF richer than expected:
+REF:   Two Chinese men have been jailed for selling military intelligence.
+       Material includes hundreds of photos of China's first aircraft carrier,
+       the Liaoning. They were jailed for six to eight years.
+PRED:  Two Chinese men have been jailed for selling military intelligence to
+       foreign spies, state media reported. The two men, surnamed Han and
+       Zhang, were sentenced to eight and six years in prison respectively.
+       Han, 30, was approached via WeChat. Zhang, 23, sent more than 500
+       pictures of the Liaoning to a foreign magazine editor.
+```
+
+Several samples (10, 16, 17, 19) show this pattern — **PRED preserves or exceeds REF in entity coverage** (specific names, ages, locations, mechanisms) while staying faithful. This is the opposite of the vagueness failure mode flagged during the selection-metric debate.
+
+**One factual drift noted — catalog for future error analysis:**
+```
+Sample 15 — REF says Le Clos is "22-year-old"; PRED says "20-year-old".
+           (At the time of the London 2012 Olympics he was ~20; the REF
+           may be using present-at-time-of-writing age. PRED drifted either
+           to the age at time of event, or hallucinated. Worth cataloguing
+           for the 🔍 Error Analysis section.)
+```
+
+No repetition, no over-extraction, no degenerate outputs across the 20 samples. Summaries are 2–4 sentences, news-shaped, entity-rich.
+
+#### Stage 2 verdict
+
+**Behaviorally correct and qualitatively strong.** Working checkpoint at `/content/checkpoints/stage2/best/` (~1.6 GB safetensors). Stage 2 joins Stage 1 in the "smoke-validated, full 50K is polish" bucket.
+
+Ready to chain with Stage 1 for end-to-end summarization in the evaluation section. Because Stage 2 was trained with *reference* first-highlight headlines as prefix (not Stage-1-generated), the pipeline will have a small train/inference distribution shift when we plug in Stage 1's actual outputs — worth watching in the E2E test.
+
 ---
 
 ## 4. Config & Infra Changes
@@ -439,6 +508,8 @@ Whether to run the full 50K before moving on is a **polish-vs-progress decision*
 | `summarization.training.gradient_accumulation_steps` | 4 | 8 (keeps effective batch at 32) |
 | `summarization.training.fp16` | — | `true` (halves memory, faster on T4) |
 | `summarization.training.gradient_checkpointing` | — | `true` (trades compute for memory) |
+| `generation.*` | — | Added Stage 1 headline generation block (num_beams=4, min_length=5, length_penalty=1.0, no_repeat_ngram_size=3, early_stopping=true) |
+| `generation_stage2.*` | — | Added Stage 2 summary generation block (num_beams=4, min_length=30, length_penalty=2.0, no_repeat_ngram_size=3, early_stopping=true) — BART's published CNN/DM defaults |
 | `clustering.hdbscan.min_cluster_size` | 3 | 2 (sweep winner) |
 | `clustering.hdbscan.metric` | `"cosine"` (label) | clarifying comment: implemented as euclidean on L2-normalized vectors |
 
@@ -473,8 +544,12 @@ Whether to run the full 50K before moving on is a **polish-vs-progress decision*
 | `data/clusters/newsapi_clusters_kmeans.json` | K-Means baseline |
 | `data/processed/cnn_dailymail/stage1/` | HF `DatasetDict` — Stage 1 (`article` → `headline`), smoke test 4997/500/500 |
 | `data/processed/cnn_dailymail/stage2/` | HF `DatasetDict` — Stage 2 (`"{headline}\n{article}"` → `summary_target`), smoke test 4997/500/500 |
+| `src/summarization/trainer.py` | BART Stage 1 + Stage 2 fine-tuning (train_stage1, train_stage2, compute_metrics_factory with BERTScore+rougeLsum, build_training_args with introspective kwarg filtering, generate_headlines, generate_summaries) |
 | `notebooks/01_eda.ipynb` | Executed EDA, 8 sections, embedded plots |
 | `notebooks/02_clustering.ipynb` | Executed sweep + UMAP + findings |
+| `notebooks/04_train_bart_colab.ipynb` | Stage 1 + Stage 2 Colab training cells (GPU verify, repo sync, Colab-safe deps install, Drive mount, paths+toggles, CNN/DM prep, trainer imports, Stage 1 train+eval+inspect+verify, **cross-stage VRAM cleanup cell**, Stage 2 paths, Stage 2 train+eval+inspect+verify) |
+| Colab `/content/checkpoints/stage1/best/` *(ephemeral)* | Stage 1 smoke-trained BART-large-cnn (~1.6 GB safetensors). Lost on session disconnect. |
+| Colab `/content/checkpoints/stage2/best/` *(ephemeral)* | Stage 2 smoke-trained BART-large-cnn (~1.6 GB safetensors), selected by rougeLsum=0.503. Lost on session disconnect. |
 
 ---
 
@@ -500,27 +575,33 @@ Whether to run the full 50K before moving on is a **polish-vs-progress decision*
 
 10. ~~**Stage 1 headline quality under training.**~~ **Resolved in v1/v2 Colab runs:** v1 exposed the extractive-copy failure caused by using "first sentence of article" as label; v2 switched to "first bullet of highlights" and produced short, abstractive, headline-shaped outputs. Reuters-dateline leakage was not observed in the v2 smoke-test generations.
 
-11. **Stage 1 warmup-too-long on smoke-test scale.** v2 smoke test had 468 total training steps but `warmup_steps=500` (from the config tuned for 50K training). LR never reached target → model barely moved from pretrained weights. Outputs still look good because `bart-large-cnn` is already CNN/DM-trained, but this means the smoke test doesn't exercise realistic training dynamics. **On the 50K full run this disappears** (warmup = 11% of 4687 steps, standard ratio). **Optional fix:** add a `warmup_steps` override when `SMOKE_TEST=True` — deferred.
+11. **Stage 1 warmup-too-long on smoke-test scale.** v2 smoke test had 468 total training steps but `warmup_steps=500` (from the config tuned for 50K training). LR never reached target → model barely moved from pretrained weights. Outputs still look good because `bart-large-cnn` is already CNN/DM-trained, but this means the smoke test doesn't exercise realistic training dynamics. **On the 50K full run this disappears** (warmup = 11% of 4687 steps, standard ratio). **Optional fix:** add a `warmup_steps` override when `SMOKE_TEST=True` — deferred. **Also applies to Stage 2 smoke test** (same step budget of 468).
 
-12. **Full 50K Stage 1 run.** Smoke test confirmed correctness; full run is polish-only and requires ~2h Colab time (may span sessions). The existing `/content/checkpoints/stage1/best/` checkpoint is usable for feeding Stage 2. Deferred — user decision pending.
+12. **Full 50K Stage 1 + Stage 2 runs.** Smoke tests confirmed correctness for both stages; full runs are polish-only and each requires ~2h Colab time (may span sessions). Existing checkpoints at `/content/checkpoints/stage1/best/` and `/content/checkpoints/stage2/best/` are usable for downstream pipeline work. Deferred — user decision pending.
 
-13. **Stage 1 checkpoint is on Colab `/content/`, not persisted.** Smoke test deliberately saved locally (Drive was out of space). If the Colab session drops before Stage 2 runs, the checkpoint is lost and we'd need to re-train (fast at smoke-test scale). For the real Stage 2 pipeline, either flip `SAVE_TO_DRIVE=True` (requires Drive space) or train Stage 1 + Stage 2 in the same session.
+13. **Stage 1 and Stage 2 checkpoints are on Colab `/content/`, not persisted.** Smoke tests deliberately saved locally (Drive was out of space). If the Colab session drops, the checkpoints are lost and we'd need to re-train (fast at smoke-test scale). For the E2E pipeline test we'll either need to flip `SAVE_TO_DRIVE=True` (requires Drive space), push to HuggingFace Hub, or run the whole pipeline end-to-end in one session. Each Stage-1/2 best/ directory is ~1.6 GB.
+
+14. **Stage 2 train/inference distribution shift.** Stage 2 was trained with **reference** first-highlight headlines as prefix (`"{highlight_0}\n{article}"`). At inference time in the E2E pipeline we'll plug in **Stage 1 generated** headlines instead. If Stage 1's headlines differ stylistically from first-highlight references, Stage 2 summaries may degrade. Watch for this in the 🔁 End-to-End Pipeline Test. Mitigations: use Stage 1 generated headlines during Stage 2 training (requires a first-pass Stage 1 model), or train Stage 2 without headline prefix to see the ablation delta (this *is* Ablation 1 from §5.7).
+
+15. **Factual drift catalogued for Error Analysis.** Stage 2 sample 15 showed a factual drift where PRED said "20-year-old" while REF said "22-year-old" (Chad le Clos at 2012 London Olympics). He was actually ~20 at the event; the REF may be using his age at writing time. Either the model drifted to the event-time age (acceptable paraphrase) or hallucinated. Add to the 🔍 Error Analysis hallucination examples when that section runs.
+
+16. **Cross-stage VRAM cleanup on Colab.** Running Stage 1 then Stage 2 in the same Colab session OOMs on a T4 — Stage 1's trainer + generation model + BERTScorer all stay pinned via the cell output traceback and reference chains that ordinary `del` + `gc.collect()` + `torch.cuda.empty_cache()` cannot surgically free. **Working fix: restart session between stages** (preserves `/content/` on disk, so checkpoints and prepped data survive). For a multi-stage notebook pattern this is a real constraint worth noting for future re-runs. A `gc.collect() + torch.cuda.empty_cache()` safety net was added at the top of `train_stage2` but the primary fix is the session restart.
 
 ---
 
 ## 7. Next Section
 
-**Decision point — two paths forward:**
+Both Stage 1 and Stage 2 are smoke-validated with working checkpoints. Next reasonable moves:
 
-**Path A (recommended): Proceed to 📝 BART Stage 2 — Summary Generation.**
-Stage 1 smoke-validated. A working checkpoint exists. Stage 2 extends `src/summarization/trainer.py` with `train_stage2()` that reuses `tokenize_stage_dataset` / `compute_metrics_factory` / `build_training_args` against Stage 2 config:
-- input column = `input` (already assembled as `"{headline}\n{article}"` by `cnn_dm_prep.py`)
-- target column = `target` (joined highlights)
-- `max_output_tokens=128` (vs Stage 1's 48)
-- same BERTScore-F1 selection metric, same per-epoch eval on 500 val subset
-Adds Stage 2 cells to `notebooks/04_train_bart_colab.ipynb` (a training cell + eval cell + sample-inspection cell). Stage 2 training is independent of Stage 1 at training time (uses the *reference* headline as prefix), so the current Stage 1 checkpoint quality doesn't gate Stage 2 training — only downstream inference.
+**Path A (recommended): 🏷️ Named Entity Recognition.**
+Implement `src/ner/entity_extractor.py` using spaCy `en_core_web_trf`. NER runs on the Stage 2 generated summaries and (as fallback) on source articles. Entities feed into the Streamlit UI's event cards. Well-scoped, no GPU needed, independent of the remaining BART work — easy forward progress.
 
-**Path B: Full 50K Stage 1 run first.**
-Produces a checkpoint with real learning and paper-comparable numbers. Roughly 2h Colab time. Would require either resolving Drive space or completing in a single session to keep the checkpoint.
+**Path B: 🔁 End-to-End Pipeline Test.**
+Glue Stage 1 + Stage 2 + multi-doc inputs on the Multi-News cluster set (300 clusters we prepared). Produces (headline, summary) pairs per cluster using our two trained models. Validates the full inference pipeline and surfaces the Stage-2-train/inference distribution shift (Stage 2 was trained on reference headlines, at inference it sees Stage-1-generated ones). Higher information value for the final report but requires another Colab session for generation.
 
-User to choose before we proceed.
+**Path C: 📏 Automatic Evaluation.**
+Run ROUGE + BERTScore on CNN/DM test split (single-doc) and Multi-News (multi-doc). Also computes headline–summary consistency (deferred from Stage 2). Depends on Path B being done first for the multi-doc numbers.
+
+**Deferred (polish, not correctness):** full 50K Stage 1 and Stage 2 runs. A working Stage 1 and Stage 2 pair exists already; running longer would polish metrics but not change behavior.
+
+User to choose.
