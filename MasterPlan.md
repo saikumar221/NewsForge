@@ -129,10 +129,12 @@ The project uses three datasets with distinct, non-overlapping roles.
 - **Selection metric during training:** BERTScore F1 on 500-example val subset per epoch (ROUGE-1/2/L + eval_loss logged but not used for selection — ROUGE would bias toward extraction on this task).
 
 #### Stage 2 — Summary Generation
-- **Model:** `facebook/bart-large-cnn`
+- **Model:** `facebook/bart-large-cnn` (fresh; Stage 2 is trained independently of Stage 1)
 - **Input:** Reference (or Stage-1-generated) headline prepended to article/cluster text, newline-separated: `"{headline}\n{article}"`
 - **Output:** 2–3 sentence summary (max 128 tokens)
 - **Target:** Concatenated CNN/Daily Mail highlights (newlines → spaces, `" ."` artifact normalized to `"."`)
+- **Selection metric during training:** `rougeLsum` (HF's canonical per-sentence LCS metric for summarization; predictions/references are sentence-split on `. ! ?` before scoring so rougeLsum doesn't degenerate to rougeL). rouge1/rouge2/rougeL + bertscore_f1 logged alongside.
+- **Generation params:** `generation_stage2` config block — `num_beams=4, min_length=30, length_penalty=2.0, no_repeat_ngram_size=3`. `length_penalty=2.0` matches BART's published CNN/DM summarization default; `min_length=30` ensures summaries aren't truncated to a headline.
 
 #### Training Configuration
 | Parameter | Value | Notes |
@@ -342,14 +344,20 @@ news_summarization/
 - [ ] Qualitatively inspect 20–30 generated headlines — *cell 10 (20 sample headlines with refs)*
 
 ### 📝 BART Stage 2 — Summary Generation
-- [ ] Implement training loop in trainer.py for Stage 2
-- [ ] Prepend generated headline as context prefix to input
-- [ ] Fine-tune on CNN/Daily Mail summaries (max 128 output tokens)
-- [ ] Monitor training and validation loss
-- [ ] Save Stage 2 checkpoint to models/checkpoints/
-- [ ] Evaluate Stage 2 with ROUGE and BERTScore
-- [ ] Compute headline–summary consistency score (BERTScore)
-- [ ] Qualitatively inspect 20–30 headline–summary pairs
+- [x] Implement training loop in trainer.py for Stage 2 (`train_stage2()`; reuses `tokenize_stage_dataset`/`compute_metrics_factory`/`build_training_args` with stage2 config)
+- [x] Prepend generated headline as context prefix to input — at training time the *reference* first-highlight headline is used; Stage 1's generated headline is plugged in at inference (evaluation section)
+- [x] Add `generation_stage2` block to config.yaml (length_penalty=2.0, min_length=30 — BART's published CNN/DM summarization defaults)
+- [x] Extend `compute_metrics_factory` with `rougeLsum` + sentence-boundary splitting (HF's canonical summarization metric)
+- [x] Extend `build_training_args` with `selection_metric` parameter (replaces hardcoded bertscore_f1)
+- [x] Append Stage 2 cells to `notebooks/04_train_bart_colab.ipynb` (paths+toggle, train, full-val metrics, 20-sample inspection, checkpoint verify)
+- [x] Local validation — compute_metrics returns `{rouge1, rouge2, rougeL, rougeLsum, bertscore_f1}`; rougeLsum ≠ rougeL on multi-sentence test, confirming sentence-split is effective
+- [ ] Fine-tune on CNN/Daily Mail summaries (max 128 output tokens) — *run on Colab*
+- [ ] Monitor training and validation loss — *observed during Colab run*
+- [ ] Save Stage 2 checkpoint to models/checkpoints/ — *auto-saved via Trainer (local /content or Drive, per `SAVE_TO_DRIVE_STAGE2` toggle)*
+- [ ] Evaluate Stage 2 with ROUGE and BERTScore — *final_val_* metrics printed at end of training*
+- [ ] Qualitatively inspect 20–30 headline–summary pairs — *cell: 20 samples with ref headline + ref summary + pred summary side by side*
+
+*(Headline–summary consistency score moved to §📏 Automatic Evaluation — it's a cross-stage metric computed after both models exist.)*
 
 ### 📚 Supplementary Fine-Tuning
 - [ ] Load Multi-News dataset from Hugging Face

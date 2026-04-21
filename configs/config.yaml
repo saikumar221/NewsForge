@@ -80,11 +80,20 @@ summarization:
     fp16: true                       # Mixed-precision training — halves memory, faster on T4
     gradient_checkpointing: true     # Trades compute for memory (recomputes activations in backward)
 
-# --- Generation Parameters (BART inference, Stage 1 + Stage 2) ---
+# --- Generation Parameters (BART inference, Stage 1 — headline) ---
 generation:
   num_beams: 4
   min_length: 5                   # Guards against trivial / degenerate outputs
   length_penalty: 1.0             # Neutral; headlines are short so no bias toward length
+  no_repeat_ngram_size: 3
+  early_stopping: true
+
+# --- Generation Parameters (BART inference, Stage 2 — summary) ---
+# Summaries want longer, fuller output than headlines.
+generation_stage2:
+  num_beams: 4
+  min_length: 30                  # Floor ~30 tokens so summaries aren't truncated to a headline
+  length_penalty: 2.0             # BART's published CNN/DM summarization default
   no_repeat_ngram_size: 3
   early_stopping: true
 

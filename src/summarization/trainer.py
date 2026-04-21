@@ -29,11 +29,26 @@ them on a T4.
 
 import argparse
 import os
+import re
 from typing import Any, Callable
 
 import numpy as np
 import yaml
 from datasets import Dataset, DatasetDict, load_from_disk
+
+# Sentence-boundary splitter used for `rougeLsum` evaluation on summaries.
+# rougeLsum scores each sentence-aligned pair and averages; if the input is a
+# single line the metric degenerates to plain rougeL, so we re-insert newlines
+# on sentence terminators before scoring. Standard HF summarization recipe.
+_SENTENCE_BOUNDARY_RE = re.compile(r"(?<=[.!?])\s+(?=[A-Z0-9\"'])")
+
+
+def _split_sentences_for_rouge_sum(text: str) -> str:
+    """Split `text` on sentence boundaries and rejoin with newlines."""
+    if not text:
+        return ""
+    sentences = _SENTENCE_BOUNDARY_RE.split(text.strip())
+    return "\n".join(s.strip() for s in sentences if s.strip())
 
 
 def load_config(config_path: str = "configs/config.yaml") -> dict:
@@ -110,8 +125,13 @@ def compute_metrics_factory(
     Build a `compute_metrics` closure usable by `Seq2SeqTrainer`.
 
     Returns a dict on every eval call containing:
-      rouge1 / rouge2 / rougeL (F1), bertscore_f1
+      - each requested ROUGE variant's F1 (rouge1 / rouge2 / rougeL / rougeLsum)
+      - bertscore_f1
     `eval_loss` is added by the Trainer itself.
+
+    If `rougeLsum` is requested, predictions and references are sentence-split
+    and newline-joined before scoring so rougeLsum actually does per-sentence
+    LCS aggregation rather than degenerating to rougeL.
 
     BERTScore model is initialised once and reused across eval calls (saves
     ~1.4GB re-download per epoch).
@@ -120,6 +140,7 @@ def compute_metrics_factory(
     from rouge_score import rouge_scorer
 
     rouge_types = rouge_types or ["rouge1", "rouge2", "rougeL"]
+    need_sentence_split = "rougeLsum" in rouge_types
     rouge = rouge_scorer.RougeScorer(rouge_types, use_stemmer=True)
     bertscorer = BERTScorer(
         model_type=bertscore_model_type,
@@ -140,14 +161,23 @@ def compute_metrics_factory(
         decoded_preds = _decode(preds)
         decoded_labels = _decode(labels)
 
+        if need_sentence_split:
+            rouge_preds = [_split_sentences_for_rouge_sum(p) for p in decoded_preds]
+            rouge_refs = [_split_sentences_for_rouge_sum(r) for r in decoded_labels]
+        else:
+            rouge_preds = decoded_preds
+            rouge_refs = decoded_labels
+
         rouge_totals = {rt: 0.0 for rt in rouge_types}
-        for pred, ref in zip(decoded_preds, decoded_labels):
+        for pred, ref in zip(rouge_preds, rouge_refs):
             scores = rouge.score(ref, pred)
             for rt in rouge_types:
                 rouge_totals[rt] += scores[rt].fmeasure
-        n = max(len(decoded_preds), 1)
+        n = max(len(rouge_preds), 1)
         out: dict[str, float] = {rt: rouge_totals[rt] / n for rt in rouge_types}
 
+        # BERTScore scores on the flat (non-split) text — sentence splitting is
+        # only meaningful for ROUGE, not for semantic similarity embeddings.
         _, _, f1 = bertscorer.score(decoded_preds, decoded_labels)
         out["bertscore_f1"] = float(f1.mean().item())
         return out
@@ -163,6 +193,7 @@ def build_training_args(
     generation_cfg: dict,
     stage_cfg: dict,
     output_dir: str,
+    selection_metric: str = "bertscore_f1",
     logging_dir: str | None = None,
 ):
     """
@@ -192,7 +223,7 @@ def build_training_args(
         "save_strategy": "epoch",
         "save_total_limit": 2,
         "load_best_model_at_end": True,
-        "metric_for_best_model": "bertscore_f1",
+        "metric_for_best_model": selection_metric,
         "greater_is_better": True,
         "predict_with_generate": True,
         "generation_max_length": stage_cfg["max_output_tokens"],
@@ -351,6 +382,151 @@ def train_stage1(
         "best_model_checkpoint": trainer.state.best_model_checkpoint,
         "final_full_val_metrics": final_metrics,
     }
+
+
+def train_stage2(
+    config: dict,
+    stage2_data_dir: str,
+    output_dir: str,
+    eval_subset_size: int = 500,
+) -> dict[str, Any]:
+    """
+    Fine-tune BART Stage 2 on the prepared CNN/DM summary dataset.
+
+    Near-copy of `train_stage1` with three meaningful differences:
+      1. Uses the `stage2` config block (max_output_tokens=128).
+      2. Reads from the Stage 2 DatasetDict — columns `[id, input, target, headline]`
+         where `input` is already `"{headline}\\n{article}"`.
+      3. Selection metric is `rougeLsum` (summary convention) instead of
+         `bertscore_f1`, and generation uses `config["generation_stage2"]`
+         (length_penalty=2.0, min_length=30).
+
+    Both stages train independently from `facebook/bart-large-cnn`; the Stage 1
+    model is only used at *inference* time to produce headline prefixes — at
+    training time Stage 2 sees reference (first-highlight) headlines.
+    """
+    from transformers import DataCollatorForSeq2Seq, Seq2SeqTrainer
+
+    summ_cfg = config["summarization"]
+    stage_cfg = summ_cfg["stage2"]
+    training_cfg = summ_cfg["training"]
+    generation_cfg = config["generation_stage2"]
+    eval_cfg = config["evaluation"]
+
+    print(f"[train_stage2] Loading tokenizer + model: {summ_cfg['model_name']}")
+    tokenizer, model = load_tokenizer_and_model(summ_cfg["model_name"])
+
+    # Override BART-large-cnn's generation defaults with the Stage 2 block.
+    model.generation_config.min_length = generation_cfg["min_length"]
+    model.generation_config.max_length = stage_cfg["max_output_tokens"]
+    model.generation_config.num_beams = generation_cfg["num_beams"]
+    model.generation_config.length_penalty = generation_cfg["length_penalty"]
+    model.generation_config.no_repeat_ngram_size = generation_cfg["no_repeat_ngram_size"]
+    model.generation_config.early_stopping = generation_cfg["early_stopping"]
+
+    print(f"[train_stage2] Loading prepared data from {stage2_data_dir}")
+    data = load_from_disk(stage2_data_dir)
+    print(
+        f"  splits: "
+        f"train={len(data['train'])}, val={len(data['validation'])}, test={len(data['test'])}"
+    )
+    print(f"  columns: {data['train'].column_names}")
+
+    eval_subset = _select_subset(data["validation"], eval_subset_size)
+    print(
+        f"  per-epoch eval subset: {len(eval_subset)} / {len(data['validation'])} "
+        f"val examples"
+    )
+
+    print("[train_stage2] Tokenizing datasets...")
+    tokenize_kwargs = dict(
+        tokenizer=tokenizer,
+        input_col="input",
+        target_col="target",
+        max_input=stage_cfg["max_input_tokens"],
+        max_output=stage_cfg["max_output_tokens"],
+    )
+    tokenized_train = tokenize_stage_dataset(data["train"], **tokenize_kwargs)
+    tokenized_eval_subset = tokenize_stage_dataset(eval_subset, **tokenize_kwargs)
+    tokenized_full_val = tokenize_stage_dataset(data["validation"], **tokenize_kwargs)
+
+    # Stage 2 requests rougeLsum alongside the other ROUGE variants so the
+    # selection metric has a value to read.
+    stage2_rouge_types = list(eval_cfg["rouge_types"])
+    if "rougeLsum" not in stage2_rouge_types:
+        stage2_rouge_types = [*stage2_rouge_types, "rougeLsum"]
+
+    compute_metrics = compute_metrics_factory(
+        tokenizer,
+        bertscore_model_type=eval_cfg["bertscore_model"],
+        rouge_types=stage2_rouge_types,
+    )
+
+    training_args = build_training_args(
+        training_cfg=training_cfg,
+        generation_cfg=generation_cfg,
+        stage_cfg=stage_cfg,
+        output_dir=output_dir,
+        selection_metric="rougeLsum",
+    )
+
+    collator = DataCollatorForSeq2Seq(
+        tokenizer=tokenizer, model=model, pad_to_multiple_of=8
+    )
+
+    trainer_kwargs: dict[str, Any] = dict(
+        model=model,
+        args=training_args,
+        train_dataset=tokenized_train,
+        eval_dataset=tokenized_eval_subset,
+        data_collator=collator,
+        compute_metrics=compute_metrics,
+    )
+    import inspect
+    sig = inspect.signature(Seq2SeqTrainer.__init__)
+    trainer_kwargs["processing_class" if "processing_class" in sig.parameters else "tokenizer"] = tokenizer
+    trainer = Seq2SeqTrainer(**trainer_kwargs)
+
+    print("[train_stage2] Starting training...")
+    train_result = trainer.train()
+    trainer.save_model(os.path.join(output_dir, "best"))
+
+    print("[train_stage2] Full-val evaluation on complete validation split...")
+    final_metrics = trainer.evaluate(
+        eval_dataset=tokenized_full_val, metric_key_prefix="final_val"
+    )
+
+    return {
+        "train_result": train_result,
+        "best_model_checkpoint": trainer.state.best_model_checkpoint,
+        "final_full_val_metrics": final_metrics,
+    }
+
+
+def generate_summaries(
+    model,
+    tokenizer,
+    inputs: list[str],
+    generation_cfg: dict,
+    max_input_tokens: int,
+    max_output_tokens: int,
+    batch_size: int = 4,
+    device: str | None = None,
+) -> list[str]:
+    """
+    Beam-search summary generation for a list of `"{headline}\\n{article}"`
+    inputs. Same machinery as `generate_headlines` with Stage 2 bounds.
+    """
+    return generate_headlines(
+        model=model,
+        tokenizer=tokenizer,
+        articles=inputs,
+        generation_cfg=generation_cfg,
+        max_input_tokens=max_input_tokens,
+        max_output_tokens=max_output_tokens,
+        batch_size=batch_size,
+        device=device,
+    )
 
 
 # --- Inference helper ---------------------------------------------------------------
