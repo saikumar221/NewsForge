@@ -379,12 +379,39 @@ def run_multinews_pipeline(
     Load both fine-tuned BART checkpoints, build inputs from Multi-News
     clusters, run the two-stage pipeline, and (optionally) save results.
     """
+
+    def _resolve_clusters_path(path: str) -> str:
+        """Resolve Multi-News clusters path robustly across local/Colab cwd."""
+        if os.path.isfile(path):
+            return path
+
+        # Resolve relative paths against the repository root derived from this file.
+        repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+        candidate = os.path.join(repo_root, path)
+        if os.path.isfile(candidate):
+            return candidate
+
+        # Common Colab working dirs may differ from repo root.
+        colab_candidate = os.path.join("/content/NewsForge", path)
+        if os.path.isfile(colab_candidate):
+            return colab_candidate
+
+        raise FileNotFoundError(
+            "Multi-News clusters file not found. "
+            f"Tried: '{path}', '{candidate}', '{colab_candidate}'. "
+            "Generate it first via src/collection/multinews_loader.py or pass --clusters with an absolute path."
+        )
+
     print(f"[run_multinews_pipeline] Loading Stage 1 from {stage1_ckpt_dir}")
     stage1_model, stage1_tokenizer = load_stage_model(stage1_ckpt_dir, device=device)
 
-    print(f"[run_multinews_pipeline] Building Multi-News inputs from {clusters_path}")
+    resolved_clusters_path = _resolve_clusters_path(clusters_path)
+    print(
+        "[run_multinews_pipeline] Building Multi-News inputs from "
+        f"{resolved_clusters_path}"
+    )
     inputs = build_multinews_inputs(
-        clusters_path=clusters_path,
+        clusters_path=resolved_clusters_path,
         tokenizer=stage1_tokenizer,
         max_input_tokens=config["summarization"]["stage1"]["max_input_tokens"],
     )
