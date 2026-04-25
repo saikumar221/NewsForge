@@ -366,11 +366,13 @@ news_summarization/
 - [ ] Compare ROUGE scores before and after Multi-News fine-tuning
 
 ### 🔁 End-to-End Pipeline Test
-- [ ] Implement inference pipeline in summarizer.py
-- [ ] Run full pipeline on 10–20 Multi-News clusters (primary)
-- [ ] Run full pipeline on 10–20 NewsAPI HDBSCAN clusters (live-mode smoke test)
-- [ ] Inspect generated headline–summary pairs for quality
-- [ ] Log any hallucinations or incoherence issues
+- [x] Implement inference pipeline in `src/summarization/summarizer.py` — `load_stage_model`, `construct_multidoc_from_strings`, `build_multinews_inputs`, `build_newsapi_inputs`, `run_pipeline`, `run_multinews_pipeline`, `save_results`, CLI `main()`
+- [x] Append E2E cells to `notebooks/04_train_bart_colab.ipynb` (cleanup + runner + 10-sample inspection + auto-download)
+- [x] Local validation — built inputs for all 300 Multi-News clusters from cached `clusters.json`; 228 hit the 1024-token cap (expected for real multi-doc); 72 stay under
+- [ ] Run full pipeline on all **300 Multi-News clusters** — *executes on Colab after Stage 1 + Stage 2 smoke training*
+- [ ] Inspect 10 random (headline, summary, reference) triples for quality — *cell 33 of Colab notebook*
+- [ ] Log any hallucinations or incoherence issues — *user review from inspection output*
+- [x] **Deferred:** NewsAPI HDBSCAN clusters (skipped this section; `build_newsapi_inputs` exists for future use). Headline–summary consistency score → 📏 Automatic Evaluation. ROUGE/BERTScore vs references → 📏 Automatic Evaluation.
 
 ### 🏷️ Named Entity Recognition
 - [ ] Install and set up spaCy with en_core_web_trf model
