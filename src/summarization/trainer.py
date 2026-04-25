@@ -312,30 +312,17 @@ def train_stage1(
     )
 
     print("[train_stage1] Tokenizing datasets...")
-    tokenized_train = tokenize_stage_dataset(
-        data["train"],
-        tokenizer,
+    tokenize_kwargs = dict(
+        tokenizer=tokenizer,
         input_col="article",
         target_col="headline",
         max_input=stage_cfg["max_input_tokens"],
         max_output=stage_cfg["max_output_tokens"],
     )
-    tokenized_eval_subset = tokenize_stage_dataset(
-        eval_subset,
-        tokenizer,
-        input_col="article",
-        target_col="headline",
-        max_input=stage_cfg["max_input_tokens"],
-        max_output=stage_cfg["max_output_tokens"],
-    )
-    tokenized_full_val = tokenize_stage_dataset(
-        data["validation"],
-        tokenizer,
-        input_col="article",
-        target_col="headline",
-        max_input=stage_cfg["max_input_tokens"],
-        max_output=stage_cfg["max_output_tokens"],
-    )
+    tokenized_train = tokenize_stage_dataset(data["train"], **tokenize_kwargs)
+    tokenized_eval_subset = tokenize_stage_dataset(eval_subset, **tokenize_kwargs)
+    tokenized_full_val = tokenize_stage_dataset(data["validation"], **tokenize_kwargs)
+    tokenized_test = tokenize_stage_dataset(data["test"], **tokenize_kwargs)
 
     compute_metrics = compute_metrics_factory(
         tokenizer,
@@ -377,10 +364,16 @@ def train_stage1(
         eval_dataset=tokenized_full_val, metric_key_prefix="final_val"
     )
 
+    print("[train_stage1] Test-set evaluation...")
+    test_metrics = trainer.evaluate(
+        eval_dataset=tokenized_test, metric_key_prefix="final_test"
+    )
+
     return {
         "train_result": train_result,
         "best_model_checkpoint": trainer.state.best_model_checkpoint,
         "final_full_val_metrics": final_metrics,
+        "final_test_metrics": test_metrics,
     }
 
 
@@ -449,6 +442,7 @@ def train_stage2(
     tokenized_train = tokenize_stage_dataset(data["train"], **tokenize_kwargs)
     tokenized_eval_subset = tokenize_stage_dataset(eval_subset, **tokenize_kwargs)
     tokenized_full_val = tokenize_stage_dataset(data["validation"], **tokenize_kwargs)
+    tokenized_test = tokenize_stage_dataset(data["test"], **tokenize_kwargs)
 
     # Stage 2 requests rougeLsum alongside the other ROUGE variants so the
     # selection metric has a value to read.
@@ -496,10 +490,16 @@ def train_stage2(
         eval_dataset=tokenized_full_val, metric_key_prefix="final_val"
     )
 
+    print("[train_stage2] Test-set evaluation...")
+    test_metrics = trainer.evaluate(
+        eval_dataset=tokenized_test, metric_key_prefix="final_test"
+    )
+
     return {
         "train_result": train_result,
         "best_model_checkpoint": trainer.state.best_model_checkpoint,
         "final_full_val_metrics": final_metrics,
+        "final_test_metrics": test_metrics,
     }
 
 

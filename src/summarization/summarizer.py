@@ -263,6 +263,108 @@ def save_results(results: list[dict[str, Any]], output_path: str) -> str:
 # --- High-level orchestrator -------------------------------------------------------
 
 
+def build_cnn_dm_test_inputs(
+    test_data_dir: str,
+    n_examples: int | None = None,
+) -> list[dict[str, Any]]:
+    """
+    Build pipeline inputs from a CNN/Daily Mail Stage 1 test split.
+
+    The Stage 1 dataset has columns `[id, article, headline]` where `headline`
+    is the first-bullet-of-highlights label we use for training. We use the
+    article body as the multi_doc_input (single-doc here, since CNN/DM is not
+    pre-grouped) and carry the reference headline + reference summary forward.
+
+    For the reference summary at evaluation time, we re-derive the
+    summary-target from the highlights (via `derive_summary_target` in
+    cnn_dm_prep) — but since we don't have the highlights field on the Stage 1
+    dataset, we instead read it from the Stage 2 dataset (which carries the
+    same `id`s with the joined-highlights `target` field).
+    """
+    from datasets import load_from_disk
+
+    stage1_dir = os.path.join(os.path.dirname(test_data_dir.rstrip("/")), "stage1") \
+        if not test_data_dir.endswith("stage1") else test_data_dir
+    stage2_dir = os.path.join(os.path.dirname(test_data_dir.rstrip("/")), "stage2") \
+        if not test_data_dir.endswith("stage2") else test_data_dir
+
+    s1 = load_from_disk(stage1_dir)["test"]
+    s2 = load_from_disk(stage2_dir)["test"]
+
+    # Align by `id` so we can carry both reference headline (from Stage 1) and
+    # reference summary (from Stage 2 `target`).
+    s2_target_by_id = {row["id"]: row["target"] for row in s2}
+
+    if n_examples is not None:
+        s1 = s1.select(range(min(n_examples, len(s1))))
+
+    inputs: list[dict[str, Any]] = []
+    for row in s1:
+        ref_summary = s2_target_by_id.get(row["id"], "")
+        inputs.append(
+            {
+                "cluster_id": row["id"],
+                "source": "cnn_dm_test",
+                "n_articles": 1,
+                "multi_doc_input": row["article"],
+                "reference_summary": ref_summary,
+                "reference_headline": row["headline"],
+                "source_articles_preview": [row["article"][:120]],
+            }
+        )
+    return inputs
+
+
+def run_cnn_dm_chained_pipeline(
+    stage1_ckpt_dir: str,
+    stage2_ckpt_dir: str,
+    test_data_root: str,
+    config: dict,
+    output_path: str | None = None,
+    n_examples: int | None = None,
+    stage1_batch_size: int = 4,
+    stage2_batch_size: int = 2,
+    device: str | None = None,
+) -> list[dict[str, Any]]:
+    """
+    Run the chained Stage 1 → Stage 2 pipeline on the CNN/Daily Mail test split.
+
+    Used by 📏 Automatic Evaluation to compute headline-summary consistency on
+    single-doc inputs, comparable apples-to-apples with the Multi-News E2E
+    consistency. The Stage 2 input format here (`"{stage1_headline}\\n{article}"`)
+    matches inference time, NOT training time (which used reference headlines).
+    """
+    print(f"[run_cnn_dm_chained_pipeline] Loading Stage 1 from {stage1_ckpt_dir}")
+    stage1_model, stage1_tokenizer = load_stage_model(stage1_ckpt_dir, device=device)
+
+    print(f"[run_cnn_dm_chained_pipeline] Building CNN/DM test inputs")
+    inputs = build_cnn_dm_test_inputs(test_data_root, n_examples=n_examples)
+    print(f"  {len(inputs)} test articles prepared")
+
+    print(f"[run_cnn_dm_chained_pipeline] Loading Stage 2 from {stage2_ckpt_dir}")
+    stage2_model, stage2_tokenizer = load_stage_model(stage2_ckpt_dir, device=device)
+
+    results = run_pipeline(
+        stage1_model=stage1_model,
+        stage1_tokenizer=stage1_tokenizer,
+        stage2_model=stage2_model,
+        stage2_tokenizer=stage2_tokenizer,
+        inputs=inputs,
+        config=config,
+        stage1_batch_size=stage1_batch_size,
+        stage2_batch_size=stage2_batch_size,
+    )
+
+    if output_path:
+        save_results(results, output_path)
+        print(
+            f"[run_cnn_dm_chained_pipeline] Saved {len(results)} chained results "
+            f"→ {output_path}"
+        )
+
+    return results
+
+
 def run_multinews_pipeline(
     stage1_ckpt_dir: str,
     stage2_ckpt_dir: str,

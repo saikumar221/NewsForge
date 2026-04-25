@@ -333,6 +333,8 @@ news_summarization/
 - [x] Load facebook/bart-large-cnn from Hugging Face (`load_tokenizer_and_model()`)
 - [x] Build Colab training notebook (`notebooks/04_train_bart_colab.ipynb`) — 11-cell flow, Drive-mounted checkpoints
 - [x] Add generation block to config.yaml (num_beams=4, min_length=5, length_penalty=1.0, no_repeat_ngram_size=3)
+- [x] Extend Stage 1 training return payload with test-split metrics (`final_test_metrics`) in `trainer.py`
+- [x] Add Stage 1 test-metrics JSON export in Colab (`data/processed/evaluation_outputs/stage1_test_metrics.json`)
 - [x] Local validation — compute_metrics unit test passed with 3 hand-crafted pairs (rouge1=0.34, bertscore_f1=0.92)
 - [x] First Colab training run completed (v1 labels — first sentence of article) — ROUGE-1=0.71 was artificially high; model learned extractive copy instead of abstractive headline generation
 - [x] **Pivot**: change headline labels from first-sentence-of-article to first-bullet-of-highlights (editor-curated salience, genuinely abstractive, ~11-word median)
@@ -368,6 +370,8 @@ news_summarization/
 ### 🔁 End-to-End Pipeline Test
 - [x] Implement inference pipeline in `src/summarization/summarizer.py` — `load_stage_model`, `construct_multidoc_from_strings`, `build_multinews_inputs`, `build_newsapi_inputs`, `run_pipeline`, `run_multinews_pipeline`, `save_results`, CLI `main()`
 - [x] Append E2E cells to `notebooks/04_train_bart_colab.ipynb` (cleanup + runner + 10-sample inspection + auto-download)
+- [x] Add chained CNN/DM test pass (Stage 1 → Stage 2) for single-doc inference-time evaluation parity (`run_cnn_dm_chained_pipeline` + Colab cell)
+- [x] Expand Colab artifact export to download the full 4-file evaluation bundle (Multi-News E2E + Stage 1 metrics + Stage 2 metrics + CNN/DM chained outputs)
 - [x] Local validation — built inputs for all 300 Multi-News clusters from cached `clusters.json`; 228 hit the 1024-token cap (expected for real multi-doc); 72 stay under
 - [ ] Run full pipeline on all **300 Multi-News clusters** — *executes on Colab after Stage 1 + Stage 2 smoke training*
 - [ ] Inspect 10 random (headline, summary, reference) triples for quality — *cell 33 of Colab notebook*
@@ -405,6 +409,11 @@ news_summarization/
 - [ ] Ablation 3 (bonus): Document clustering-quality impact on summary quality
 
 ### 📏 Automatic Evaluation
+- [x] Implement automatic evaluation module in `src/evaluation/evaluator.py` (ROUGE, BERTScore, consistency, summary table, report save/load, CLI)
+- [x] Extend `trainer.py` Stage 1/2 flows to compute and return `final_test_metrics`
+- [x] Add chained CNN/DM test inference path in `src/summarization/summarizer.py` (`run_cnn_dm_chained_pipeline`)
+- [x] Update Colab notebook (`notebooks/04_train_bart_colab.ipynb`) to export and download the 4 evaluation artifacts
+- [x] Replace `notebooks/03_evaluation.ipynb` TODO scaffold with executable local evaluation workflow + qualitative ranking cells
 - [ ] Run final ROUGE-1, ROUGE-2, ROUGE-L on CNN/Daily Mail test set (single-doc)
 - [ ] Run final BERTScore on CNN/Daily Mail test set (single-doc)
 - [ ] Run ROUGE + BERTScore on Multi-News test subset against reference summaries (multi-doc)
